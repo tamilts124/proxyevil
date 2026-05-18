@@ -1,0 +1,50 @@
+{
+  "host": "127.0.0.1",
+  "port": 8080,
+  "sidecar_port": 8081,
+  "data_dir": "evil_data",
+  "verbose": false,
+
+  "aliases": {
+    "mybook.local": "www.facebook.com",
+    "mygoogle.local": "www.google.com"
+  },
+
+  "cert_dir": "certs",
+
+  "rewrite": {
+    "html":    true,
+    "js":      true,
+    "css":     true,
+    "json":    true,
+    "headers": true,
+    "cookies": true
+  },
+
+  "strip_headers": [
+    "Content-Security-Policy",
+    "X-Frame-Options",
+    "X-Content-Type-Options",
+    "Strict-Transport-Security",
+    "X-XSS-Protection",
+    "Report-To",
+    "NEL",
+    "Cross-Origin-Opener-Policy",
+    "Cross-Origin-Embedder-Policy",
+    "Cross-Origin-Resource-Policy"
+  ],
+
+  "access_log": false,
+
+  "_comments": {
+    "access_log": "Set to true to write data_dir/access.log (TSV: timestamp method fake path status size)",
+    "max_body_bytes": "Override the 10MB body-rewrite size limit, e.g. 20971520 for 20MB",
+    "alias_extended_example": {
+      "myfb.local": {
+        "real": "www.facebook.com",
+        "extra_real": ["fbcdn.net", "fbsbx.com"],
+        "enabled": true
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+# Core
+mitmproxy>=10.3.0,<12.0     # HTTPS interception engine; API changes between majors
+watchfiles>=0.21.0           # inotify-backed config hot-reload; falls back gracefully if absent
+
+# Optional but strongly recommended
+brotli>=1.0.9                # brotli response decompression; without this, br-encoded bodies won't be rewritten
+
+# External tool (not a pip package — install separately):
+#   mkcert  https://github.com/FiloSottile/mkcert/releases
+#   After installing: mkcert -install   (run once, as Administrator on Windows)
