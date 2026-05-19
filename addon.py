@@ -127,8 +127,29 @@ class DomainAliasAddon:
 
     # ── outgoing: fake → real ─────────────────────────────────────────────────
 
+    def server_connect(self, data):
+        if not data.server.address:
+            return
+        host, port = data.server.address
+        if isinstance(host, str):
+            real = self.aliases.real_for(host)
+            if real:
+                old_sni = getattr(data.server, "sni", None)
+                data.server.address = (real, port)
+                
+                # Cloudfront/API Gateway strictly requires SNI to match the upstream domain.
+                # Always set it regardless of what the client sent.
+                data.server.sni = real
+                
+                log.debug(f"[SERVER_CONNECT] mapped {host}:{port} -> {real}:{port}, SNI {old_sni} -> {data.server.sni}")
+
     def request(self, flow: mhttp.HTTPFlow):
-        host = flow.request.host
+        print(f"DEBUG REQUEST HOOK: flow.request.host={flow.request.host}, flow.request.pretty_host={flow.request.pretty_host}")
+        if hasattr(flow.request, "authority"):
+            print(f"DEBUG REQUEST HOOK: authority={flow.request.authority}")
+        
+        # Get the fake host from the client's original request headers or SNI, NOT the upstream connection
+        host = flow.request.pretty_host
         real = self.aliases.real_for(host)
         if real is None:
             return
@@ -138,7 +159,17 @@ class DomainAliasAddon:
 
         log.info(f"[REQ]  {flow.request.method} {host}{flow.request.path}  →  {real}")
         flow.request.host            = real
-        flow.request.headers["Host"] = real
+        flow.request.host_header     = real
+        if hasattr(flow.request, "authority") and flow.request.authority:
+            flow.request.authority = real
+        if "Host" in flow.request.headers:
+            flow.request.headers["Host"] = real
+
+        print("DEBUG HEADERS TO UPSTREAM:")
+        for k, v in flow.request.headers.items():
+            print(f"  {k}: {v}")
+        if hasattr(flow.request, "authority"):
+            print(f"  :authority: {flow.request.authority}")
 
         rw = self.rw
 
@@ -226,6 +257,15 @@ class DomainAliasAddon:
                                flow.request.path, flow.response.content)
 
         self._inject(flow, fake)
+
+    def error(self, flow: mhttp.HTTPFlow):
+        fake = flow.metadata.get(_META_FAKE)
+        if fake is None:
+            return
+
+        err_msg = flow.error.msg if flow.error else "unknown error"
+        log.warning(f"[ERR]  {flow.request.method} {fake}{flow.request.path}  →  {err_msg}")
+        self.stats.error(fake)
 
     # ── helpers ───────────────────────────────────────────────────────────────
 

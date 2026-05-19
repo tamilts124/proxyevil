@@ -6,8 +6,11 @@
   "verbose": false,
 
   "aliases": {
-    "mybook.local": "www.facebook.com",
-    "mygoogle.local": "www.google.com"
+    "x.com.local": {
+      "real": "x.com",
+      "extra_real": ["twimg.com"],
+      "enabled": true
+    }
   },
 
   "cert_dir": "certs",

@@ -110,7 +110,7 @@ class _MitmNoiseFilter(logging.Filter):
             return False  # suppress
 
         # ── WinError 1225 — connection refused on non-alias CONNECT ──────────
-        if record.levelno >= logging.ERROR and _CONN_REFUSED_RE.search(msg):
+        if _CONN_REFUSED_RE.search(msg):
             if self.verbose:
                 record.levelno   = logging.DEBUG
                 record.levelname = "DEBUG"

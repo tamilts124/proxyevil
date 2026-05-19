@@ -32,6 +32,7 @@ from logfilter  import install_log_filters
 from sidecar    import start_sidecar, _hosts_block, _pac_file
 from stats      import Stats
 from watcher    import start_config_watcher
+from hosts_manager import is_admin, update_hosts_file
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,25 +49,24 @@ def _print_banner(host: str, port: int, sidecar_port: int,
     aliases  = alias_map.mapping
     cert_p   = Path(cert_dir)
     w = 62
-    print("=" * w)
+    print(f"\n{'=' * w}")
     print(f"  🦹  proxyevil  v{__version__}")
     print(f"  Proxy   : {host}:{port}")
     print(f"  Status  : http://127.0.0.1:{sidecar_port}/")
     print(f"  PAC     : http://127.0.0.1:{sidecar_port}/proxy.pac")
     print(f"  Stats   : http://127.0.0.1:{sidecar_port}/stats.json")
     print(f"  Data    : {data_dir.resolve()}")
-    print(f"  Aliases : {len(aliases)}")
+    print(f"\n  Aliases : {len(aliases)}")
     for fake, real in sorted(aliases.items()):
         cert_ok = (cert_p / f"{fake}.pem").exists() and (cert_p / f"{fake}-key.pem").exists()
-        cert_icon = "🔒" if cert_ok else "⚠ "
+        cert_icon = "🔒" if cert_ok else "► "
         print(f"    {cert_icon} {fake:<28} → {real}")
-    print()
-    print("  /etc/hosts entries needed:")
+    print("\n  Automatically added to system hosts file:")
     for fake in sorted(aliases.keys()):
         print(f"    127.0.0.1  {fake}")
     print()
     print("  Trust mitmproxy CA once: visit http://mitm.it in your browser")
-    print("=" * w)
+    print(f"{'=' * w}\n")
 
 
 # ── --check ────────────────────────────────────────────────────────────────────
@@ -172,7 +172,11 @@ async def run_proxy(
 ):
     data_dir = Path(cfg.get("data_dir", "evil_data"))
     data_dir.mkdir(parents=True, exist_ok=True)
-    confdir = str(data_dir / "mitmproxy_conf")
+    
+    # Store the mitmproxy CA in cert_dir so deleting data_dir doesn't wipe the trusted CA
+    p_cert_dir = Path(cert_dir)
+    p_cert_dir.mkdir(parents=True, exist_ok=True)
+    confdir = str(p_cert_dir / "mitmproxy_conf")
     Path(confdir).mkdir(parents=True, exist_ok=True)
 
     # Collect mkcert-generated certs and wire them into mitmproxy so it
@@ -218,6 +222,34 @@ async def run_proxy(
         signal.signal(signal.SIGTERM, _on_sigterm)
     except (OSError, ValueError):
         pass  # Windows or non-main thread — best effort
+        
+    async def _auto_install_ca():
+        import os, subprocess
+        if os.name != 'nt':
+            return
+        
+        ca_path = Path(confdir) / "mitmproxy-ca-cert.cer"
+        marker_path = Path(confdir) / ".installed"
+        
+        # Wait up to 10 seconds for mitmproxy to generate the CA
+        for _ in range(20):
+            if ca_path.exists():
+                break
+            await asyncio.sleep(0.5)
+            
+        if ca_path.exists() and not marker_path.exists():
+            log.info(f"[CERT] Auto-installing {ca_path.name} to Windows Trusted Root Store...")
+            try:
+                subprocess.run(
+                    ["certutil", "-addstore", "root", str(ca_path)],
+                    check=True, capture_output=True
+                )
+                marker_path.touch()
+                log.info(f"[CERT] ✓ CA Certificate successfully installed!")
+            except subprocess.CalledProcessError as e:
+                log.warning(f"[CERT] Auto-install failed: {e.stderr.decode('utf-8', errors='ignore')}")
+
+    loop.create_task(_auto_install_ca())
 
     try:
         await master.run()
@@ -230,6 +262,11 @@ async def run_proxy(
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main():
+    if not is_admin():
+        print("[ERROR] proxyevil must be run as Administrator/root to modify the hosts file.")
+        print("        Please restart your terminal in elevated mode.")
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(
         description="proxyevil — domain-alias MITM proxy",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -341,6 +378,10 @@ def main():
         sys.exit(1)
 
     alias_map = AliasMap(aliases)
+    
+    # Update hosts file with initial mapping
+    update_hosts_file(alias_map.mapping)
+    
     stats     = Stats()
     stats.init(alias_map.stats_keys)
 

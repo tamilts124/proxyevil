@@ -81,10 +81,20 @@ class AliasMap:
             self._fake_to_real[fake] = real
             self._real_to_fake[real] = fake
             for extra in extras:
-                self._real_to_fake[extra] = fake
+                # Generate a unique fake domain for this extra_real to maintain 1-to-1 reverse mapping
+                # e.g., extra="fbcdn.net", fake="mybook.local" -> "fbcdn-net.mybook.local"
+                extra_fake = f"{extra.replace('.', '-')}.{fake}"
+                self._fake_to_real[extra_fake] = extra
+                self._real_to_fake[extra] = extra_fake
 
         if skipped:
             log.info(f"[ALIAS] {skipped} disabled alias(es) skipped")
+
+        # Sort dictionaries by key length descending so that longest domains match first.
+        # This prevents 'fbcdn-net.mybook.local' from being caught by the shorter 'mybook.local' match.
+        self._fake_to_real = dict(sorted(self._fake_to_real.items(), key=lambda x: len(x[0]), reverse=True))
+        self._real_to_fake = dict(sorted(self._real_to_fake.items(), key=lambda x: len(x[0]), reverse=True))
+
         self._rebuild_patterns()
 
     def _rebuild_patterns(self):
@@ -98,8 +108,8 @@ class AliasMap:
             escaped     = [re.escape(d) for d in domains]
             domain_alts = "|".join(escaped)
             return re.compile(
-                r"(?:https?://(?:" + domain_alts + r"))"
-                r"|(?:(?<![a-zA-Z0-9\-.])(?:" + domain_alts + r"))",
+                r"(?:https?://(?:[a-zA-Z0-9\-]+\.)*(?:" + domain_alts + r"))"
+                r"|(?:(?<![a-zA-Z0-9\-])(?:[a-zA-Z0-9\-]+\.)*(?:" + domain_alts + r"))",
                 re.IGNORECASE,
             )
 

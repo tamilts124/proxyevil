@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 from alias_map import AliasMap
 from config    import load_config, save_config
 from stats     import Stats
+from hosts_manager import update_hosts_file
 
 if TYPE_CHECKING:
     from addon import DomainAliasAddon
@@ -316,6 +317,10 @@ class _SidecarHandler(BaseHTTPRequestHandler):
             if addon is not None and hasattr(addon, "notify_reload"):
                 addon.notify_reload()
             self.stats.init(self.alias_map.stats_keys)
+            
+            # Update hosts file based on the new loaded aliases
+            update_hosts_file(self.alias_map.mapping)
+            
             msg = f"reloaded — {len(new_aliases)} aliases"
             log.info(f"[RELOAD] {msg}")
             self._respond(200, "text/plain", msg.encode())
@@ -372,6 +377,7 @@ class _SidecarHandler(BaseHTTPRequestHandler):
             current[fake] = real
             self.alias_map.reload(current)
             self.stats.init([fake])
+            update_hosts_file(self.alias_map.mapping)
             # Optionally persist
             save = self._has_save(self.path)
             if save and self.config_path:
@@ -402,6 +408,7 @@ class _SidecarHandler(BaseHTTPRequestHandler):
             return
         del current[fake]
         self.alias_map.reload(current)
+        update_hosts_file(self.alias_map.mapping)
         save = self._has_save(self.path)
         if save and self.config_path:
             self.cfg.get("aliases", {}).pop(fake, None)
