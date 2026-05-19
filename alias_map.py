@@ -115,6 +115,14 @@ class AliasMap:
             except (UnicodeError, UnicodeDecodeError):
                 needles.append(r.encode("utf-8"))
         self._real_needles: list[bytes] = needles
+        # Fake-side needles for the request-body pre-check (rewrite_fake_to_real).
+        fake_needles = []
+        for f in self._fake_to_real:
+            try:
+                fake_needles.append(f.encode("idna"))
+            except (UnicodeError, UnicodeDecodeError):
+                fake_needles.append(f.encode("utf-8"))
+        self._fake_needles: list[bytes] = fake_needles
         # LRU caches — OrderedDict with move-to-end on hit, evict oldest on full
         self._real_cache: OrderedDict[str, Optional[str]] = OrderedDict()
         self._fake_cache: OrderedDict[str, Optional[str]] = OrderedDict()
@@ -195,9 +203,15 @@ class AliasMap:
             full = m.group(0)
             if "://" in full:
                 proto, rest = full.split("://", 1)
-                host_part   = rest.split("/")[0].split(":")[0]
-                fake        = _lookup_fake(host_part.lower(), real_to_fake)
-                return (proto + "://" + fake + rest[len(host_part):]) if fake else full
+                host_and_port = rest.split("/")[0]
+                host_part     = host_and_port.split(":")[0]
+                fake          = _lookup_fake(host_part.lower(), real_to_fake)
+                if not fake:
+                    return full
+                # Drop the port from the remainder so it isn't blindly carried
+                # into the fake URL (fake.local:443 would look broken to browsers).
+                remainder = rest[len(host_and_port):]
+                return proto + "://" + fake + remainder
             fake = _lookup_fake(full.lower(), real_to_fake)
             return fake if fake else full
 
@@ -215,9 +229,14 @@ class AliasMap:
             full = m.group(0)
             if "://" in full:
                 proto, rest = full.split("://", 1)
-                host_part   = rest.split("/")[0].split(":")[0]
-                real        = _lookup_real(host_part.lower(), fake_to_real)
-                return (proto + "://" + real + rest[len(host_part):]) if real else full
+                host_and_port = rest.split("/")[0]
+                host_part     = host_and_port.split(":")[0]
+                real          = _lookup_real(host_part.lower(), fake_to_real)
+                if not real:
+                    return full
+                # Drop the port from the remainder (same reasoning as real→fake).
+                remainder = rest[len(host_and_port):]
+                return proto + "://" + real + remainder
             real = _lookup_real(full.lower(), fake_to_real)
             return real if real else full
 
@@ -232,8 +251,26 @@ class AliasMap:
 
     @property
     def mapping(self) -> dict[str, str]:
+        """Return fake → primary-real dict (for PAC file, hosts block, banner)."""
         with self._lock:
             return dict(self._fake_to_real)
+
+    @property
+    def full_mapping(self) -> dict[str, dict]:
+        """Return fake → {real, extra_real} dict including CDN/extra_real entries.
+
+        Used by the dashboard so all configured real-side domains are visible.
+        """
+        with self._lock:
+            # Invert _real_to_fake to collect extra_real entries per fake.
+            extras: dict[str, list[str]] = {}
+            for real, fake in self._real_to_fake.items():
+                if real != self._fake_to_real.get(fake):
+                    extras.setdefault(fake, []).append(real)
+            result = {}
+            for fake, primary_real in self._fake_to_real.items():
+                result[fake] = {"real": primary_real, "extra_real": extras.get(fake, [])}
+            return result
 
     @property
     def stats_keys(self) -> list[str]:

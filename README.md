@@ -161,7 +161,10 @@ python proxy.py [options]
   --list-certs                  List generated TLS certs, then exit
   --add-alias FAKE REAL         Add a one-off alias (not persisted unless --save)
   --remove-alias FAKE           Remove an alias (not persisted unless --save)
-  --save                        Persist --add-alias / --remove-alias to config.json
+  --disable-alias FAKE          Disable alias without removing it (sets enabled=false; use --save to persist)
+  --enable-alias FAKE           Re-enable a disabled alias (use --save to persist)
+  --export DIR                  Write hosts.txt + proxy.pac to DIR and exit
+  --save                        Persist --add-alias / --remove-alias / --disable-alias / --enable-alias to config.json
   --verbose -v                  Debug logging
   --version -V                  Show version
 ```
@@ -190,9 +193,11 @@ The sidecar runs on `http://127.0.0.1:8081` by default.
 | `/proxy.pac` | GET | PAC file for browser auto-config |
 | `/hosts` | GET | Plain-text `/etc/hosts` block |
 | `/stats.json` | GET | Machine-readable stats (uptime, request counts, bytes rewritten, last seen) |
+| `/config.json` | GET | Currently running config as JSON (strips `_comments`) |
 | `/reload` | POST | Hot-reload `config.json` without restarting |
+| `/stats/save` | POST | Persist current stats to disk immediately |
 | `/reset` | POST | Reset all stats counters |
-| `/reset/<fake>` | GET | Reset stats for one alias (redirects back to dashboard) |
+| `/reset/<fake>` | POST or GET | Reset stats for one alias (GET redirects back to dashboard) |
 
 Curl examples:
 

@@ -24,13 +24,14 @@ except ImportError:
     print("[ERROR] mitmproxy not found.  Run: pip install mitmproxy")
     sys.exit(1)
 
-from alias_map import AliasMap
-from addon     import DomainAliasAddon
-from certs     import setup_certs, list_certs, collect_certs
-from config    import load_config, save_config, DEFAULTS
-from sidecar   import start_sidecar, _hosts_block, _pac_file
-from stats     import Stats
-from watcher   import start_config_watcher
+from alias_map  import AliasMap
+from addon      import DomainAliasAddon
+from certs      import setup_certs, list_certs, collect_certs
+from config     import load_config, save_config, DEFAULTS
+from logfilter  import install_log_filters
+from sidecar    import start_sidecar, _hosts_block, _pac_file
+from stats      import Stats
+from watcher    import start_config_watcher
 
 logging.basicConfig(
     level=logging.INFO,
@@ -92,12 +93,68 @@ def _run_check(aliases: dict, cert_dir: str, cfg: dict):
     body_mb = cfg.get("max_body_bytes", 10 * 1024 * 1024) // (1024 * 1024)
     print(f"Max body     : {body_mb} MB")
     print(f"Strip headers: {len(cfg.get('strip_headers', []))}")
+    print(f"Access log   : {'on' if cfg.get('access_log') else 'off'}")
+    print(f"Verbose      : {'on' if cfg.get('verbose') else 'off'}")
     print()
     if ok:
         print("✓ Config looks good.")
     else:
         print("⚠  Issues found — see above.")
     sys.exit(0 if ok else 1)
+
+
+# ── --export ───────────────────────────────────────────────────────────────────
+
+def _run_stats(stats_path):
+    """Print a human-readable stats summary from the last saved dump and exit."""
+    import json
+    p = Path(stats_path)
+    if not p.exists():
+        print("[STATS] No stats file found — proxy has not run yet.")
+        sys.exit(0)
+    raw   = json.loads(p.read_text(encoding="utf-8"))
+    saved = raw.get("saved_at", "?")
+    data  = raw.get("aliases", {})
+    w     = max((len(k) for k in data), default=20)
+    print(f"\nStats saved: {saved}")
+    print(f"{'Alias':<{w}}  {'Requests':>8}  {'Rewritten':>10}  {'Errors':>6}  Last seen")
+    print("-" * (w + 46))
+    for alias, st in sorted(data.items()):
+        rw_bytes = st.get("bytes_rewritten", 0)
+        rw_label = (
+            f"{rw_bytes / 1048576:.1f} MB" if rw_bytes >= 1048576
+            else f"{rw_bytes // 1024} KB"
+        )
+        print(
+            f"{alias:<{w}}  {st.get('requests', 0):>8}  {rw_label:>10}"
+            f"  {st.get('errors', 0):>6}  {st.get('last_seen', '—')}"
+        )
+    print()
+    sys.exit(0)
+
+
+def _run_export(aliases: dict, export_dir: str, host: str, proxy_port: int):
+    """Write hosts block and PAC file to *export_dir* and exit.
+
+    Creates the directory if it does not exist.  Writes:
+      hosts.txt      — /etc/hosts block for all alias domains
+      proxy.pac      — PAC file routing only alias domains through the proxy
+    """
+    out = Path(export_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    hosts_path = out / "hosts.txt"
+    pac_path   = out / "proxy.pac"
+
+    hosts_text = _hosts_block(aliases)
+    hosts_path.write_text(hosts_text, encoding="utf-8")
+    print(f"[EXPORT] hosts   → {hosts_path.resolve()}")
+
+    pac_text = _pac_file(aliases, host, proxy_port)
+    pac_path.write_text(pac_text, encoding="utf-8")
+    print(f"[EXPORT] pac     → {pac_path.resolve()}")
+    print(f"[EXPORT] {len(aliases)} alias(es) exported.")
+    sys.exit(0)
 
 
 # ── Proxy runner ───────────────────────────────────────────────────────────────
@@ -111,6 +168,7 @@ async def run_proxy(
     cert_dir:     str,
     config_path:  Optional[str],
     stats:        Stats,
+    stats_path:   Path,
 ):
     data_dir = Path(cfg.get("data_dir", "evil_data"))
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -136,10 +194,15 @@ async def run_proxy(
     _addon = DomainAliasAddon(alias_map, cfg, stats)
     master.addons.add(_addon)
 
-    start_sidecar(alias_map, stats, host, port, sidecar_port, cfg, config_path or "", addon=_addon)
+    start_sidecar(alias_map, stats, stats_path, host, port, sidecar_port, cfg, config_path or "", addon=_addon)
 
     if config_path:
-        start_config_watcher(config_path, alias_map, cfg, stats)
+        start_config_watcher(config_path, alias_map, cfg, stats, addon=_addon)
+
+    # Install log noise suppression AFTER the master/addon are wired up but
+    # BEFORE we start serving, so the first requests are already filtered.
+    verbose = cfg.get("verbose", False)
+    install_log_filters(alias_map, verbose=verbose)
 
     _print_banner(host, port, sidecar_port, alias_map, data_dir, cert_dir)
 
@@ -148,6 +211,7 @@ async def run_proxy(
 
     def _on_sigterm(*_):
         log.info("[*] SIGTERM received — shutting down…")
+        stats.dump(stats_path)
         loop.call_soon_threadsafe(master.shutdown)
 
     try:
@@ -159,6 +223,7 @@ async def run_proxy(
         await master.run()
     except KeyboardInterrupt:
         print("\n[*] Stopping proxyevil…")
+        stats.dump(stats_path)
         master.shutdown()
 
 
@@ -183,6 +248,14 @@ def main():
                         help="Add a one-off alias (e.g. --add-alias mybook.local www.facebook.com)")
     parser.add_argument("--remove-alias", metavar="FAKE",
                         help="Remove alias for FAKE domain (use with --save to persist)")
+    parser.add_argument("--disable-alias", metavar="FAKE",
+                        help="Disable alias (keeps config entry, sets enabled=false)")
+    parser.add_argument("--enable-alias", metavar="FAKE",
+                        help="Re-enable a previously disabled alias")
+    parser.add_argument("--export", metavar="DIR",
+                        help="Export hosts block + PAC file to DIR and exit")
+    parser.add_argument("--stats",         action="store_true",
+                        help="Print per-alias stats summary then exit")
     parser.add_argument("--save",         action="store_true",
                         help="Persist --add-alias / --remove-alias to config.json")
     parser.add_argument("--verbose",      "-v", action="store_true")
@@ -225,6 +298,42 @@ def main():
         else:
             print(f"[WARN] --remove-alias: '{key}' not found in aliases")
 
+    if args.disable_alias:
+        key = args.disable_alias.lower()
+        raw_aliases = cfg.get("aliases", {})
+        if key in raw_aliases:
+            val = raw_aliases[key]
+            if isinstance(val, str):
+                raw_aliases[key] = {"real": val, "enabled": False}
+            else:
+                raw_aliases[key]["enabled"] = False
+            log.info(f"[ALIAS] disabled: {key}")
+            if args.save:
+                cfg["aliases"] = raw_aliases
+                save_config(cfg, config_path)
+            # Refresh working aliases dict used for this run
+            aliases = {k: v for k, v in raw_aliases.items()
+                       if not (isinstance(v, dict) and not v.get("enabled", True))}
+        else:
+            print(f"[WARN] --disable-alias: '{key}' not found in aliases")
+
+    if args.enable_alias:
+        key = args.enable_alias.lower()
+        raw_aliases = cfg.get("aliases", {})
+        if key in raw_aliases:
+            val = raw_aliases[key]
+            if isinstance(val, dict):
+                val["enabled"] = True
+                raw_aliases[key] = val
+            log.info(f"[ALIAS] enabled: {key}")
+            if args.save:
+                cfg["aliases"] = raw_aliases
+                save_config(cfg, config_path)
+            aliases = {k: v for k, v in raw_aliases.items()
+                       if not (isinstance(v, dict) and not v.get("enabled", True))}
+        else:
+            print(f"[WARN] --enable-alias: '{key}' not found in aliases")
+
     if not aliases:
         print("[ERROR] No aliases configured.")
         print('        Edit config.json → "aliases": {"mybook.local": "www.facebook.com"}')
@@ -235,9 +344,16 @@ def main():
     stats     = Stats()
     stats.init(alias_map.stats_keys)
 
+    # Restore stats from the previous run if the dump file exists.
+    stats_path = Path(cfg.get("data_dir", "evil_data")) / "stats.json"
+    stats.load(stats_path)
+
     if args.hosts:
         print(_hosts_block(aliases))
         sys.exit(0)
+
+    if args.export:
+        _run_export(aliases, args.export, host, port)
 
     if args.check:
         _run_check(aliases, cert_dir, cfg)
@@ -258,13 +374,16 @@ def main():
         list_certs(cert_dir)
         sys.exit(0)
 
+    if args.stats:
+        _run_stats(stats_path)
+
     if args.setup:
         setup_certs(aliases, cert_dir)
         sys.exit(0)
 
     asyncio.run(run_proxy(
         host, port, sidecar_port, alias_map, cfg,
-        cert_dir, config_path, stats,
+        cert_dir, config_path, stats, stats_path,
     ))
 
 

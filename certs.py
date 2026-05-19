@@ -77,21 +77,19 @@ def collect_certs(aliases: dict, cert_dir: str) -> list[tuple[str, str]]:
             # file and mitmproxy finds the key by the -key.pem convention.
             # We build a combined pem so mitmproxy always finds both in one file.
             combined = p / f"{fake}-combined.pem"
-            if not combined.exists() or combined.stat().st_mtime < cert_file.stat().st_mtime:
-                # Rebuild combined pem if missing or stale.
-                # mtime comparison is unreliable on FAT32 (2 s resolution) and
-                # on Docker read-only mounts.  Use a content check instead: hash
-                # the source files and compare against a sidecar stamp file.
-                cert_bytes = cert_file.read_bytes() + b"\n" + key_file.read_bytes()
-                src_hash = hashlib.md5(cert_bytes, usedforsecurity=False).hexdigest()
-                stamp_file = p / f"{fake}-combined.md5"
-                if not combined.exists() or not stamp_file.exists() or stamp_file.read_text().strip() != src_hash:
-                    try:
-                        combined.write_bytes(cert_bytes)
-                        stamp_file.write_text(src_hash)
-                    except OSError as exc:
-                        log.warning(f"[CERT] could not write combined pem for {fake}: {exc}")
-                        continue  # skip this alias; mitmproxy will use its own CA
+            # Rebuild combined pem only when content has changed.
+            # Hash-based check is reliable on FAT32 (2 s mtime resolution)
+            # and on Docker read-only mounts where mtime is unreliable.
+            cert_bytes = cert_file.read_bytes() + b"\n" + key_file.read_bytes()
+            src_hash   = hashlib.md5(cert_bytes, usedforsecurity=False).hexdigest()
+            stamp_file = p / f"{fake}-combined.md5"
+            if not combined.exists() or not stamp_file.exists() or stamp_file.read_text().strip() != src_hash:
+                try:
+                    combined.write_bytes(cert_bytes)
+                    stamp_file.write_text(src_hash)
+                except OSError as exc:
+                    log.warning(f"[CERT] could not write combined pem for {fake}: {exc}")
+                    continue  # skip this alias; mitmproxy will use its own CA
             pairs.append((fake, str(combined)))
             log.debug(f"[CERT] loaded cert for {fake}")
         else:
@@ -105,7 +103,7 @@ def list_certs(cert_dir: str):
     if not p.exists():
         print(f"[CERT] cert_dir '{p}' does not exist")
         return
-    certs = sorted(c for c in p.glob("*.pem") if "combined" not in c.name)
+    certs = sorted(c for c in p.glob("*.pem") if "combined" not in c.name and not c.name.endswith("-key.pem"))
     if not certs:
         print(f"[CERT] no certs found in {p.resolve()}")
         return

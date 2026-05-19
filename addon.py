@@ -6,6 +6,7 @@ flow that involves a known fake domain.
 """
 
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -27,30 +28,44 @@ _BINARY_TYPES = {
 _DEFAULT_BODY_SIZE_LIMIT = 10 * 1024 * 1024   # 10 MB
 _SRI_RE = re.compile(r"""\s+integrity=(?:"[^"]*"|'[^']*')""")
 
-# Key used to stash fake/real pair in flow.metadata during request()
-# so response() doesn't have to re-derive it from the already-rewritten host.
+# Metadata keys stamped in request() and consumed in response()
 _META_FAKE = "proxyevil.fake"
 _META_REAL = "proxyevil.real"
+
+# Map content-type substrings to stats bucket names
+_CT_BUCKETS: list[tuple[str, str]] = [
+    ("text/html",    "html"),
+    ("javascript",   "js"),
+    ("ecmascript",   "js"),
+    ("text/css",     "css"),
+    ("json",         "json"),
+]
+
+
+def _ct_bucket(ct: str) -> str:
+    """Return the stats bucket name for a content-type string."""
+    for substr, bucket in _CT_BUCKETS:
+        if substr in ct:
+            return bucket
+    return "other"
 
 
 class DomainAliasAddon:
     """Bidirectional domain rewriter registered as a mitmproxy addon."""
 
     def __init__(self, alias_map: AliasMap, cfg: dict, stats: Stats):
-        self.aliases   = alias_map
-        self.cfg       = cfg     # kept by reference so hot-reload is instant
-        self.stats     = stats
-        self._log_fh: Optional[object] = None   # open file handle for access log
+        self.aliases  = alias_map
+        self.cfg      = cfg        # kept by reference so hot-reload is instant
+        self.stats    = stats
+        self._log_fh: Optional[object] = None
         self._log_path: Optional[Path] = None
-        self._cfg_gen  = 0   # bumped on hot-reload to invalidate derived caches
+        self._cfg_gen = 0          # bumped on hot-reload to invalidate caches
         self._init_access_log()
 
-    def _init_access_log(self):
-        """Open the rolling access log if 'access_log' is enabled in config.
+    # ── access log ───────────────────────────────────────────────────────────
 
-        Safe to call on hot-reload: closes any previously open handle before
-        re-opening so we never leak file descriptors.
-        """
+    def _init_access_log(self):
+        """Open or re-open the access log file. Safe to call on hot-reload."""
         if self._log_fh is not None:
             try:
                 self._log_fh.close()
@@ -65,19 +80,23 @@ class DomainAliasAddon:
         data_dir.mkdir(parents=True, exist_ok=True)
         path = data_dir / "access.log"
         try:
-            self._log_fh   = open(path, "a", encoding="utf-8", buffering=1)  # line-buffered
+            self._log_fh   = open(path, "a", encoding="utf-8", buffering=1)
             self._log_path = path
             log.info(f"[ACCESS] logging to {path}")
         except OSError as exc:
             log.warning(f"[ACCESS] could not open log file {path}: {exc}")
 
-    def _write_access(self, method: str, fake: str, path: str, status: int, size: int):
-        """Append one access-log line if the log is open."""
+    def _write_access(self, method: str, fake: str, path: str,
+                      status: int, size: int, ct: str = ""):
+        """Append one TSV access-log line if the log is open.
+
+        Format: timestamp  method  fake  path  status  size  content_type
+        """
         if self._log_fh is None:
             return
-        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())  # UTC, ISO-8601
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         try:
-            self._log_fh.write(f"{ts}\t{method}\t{fake}\t{path}\t{status}\t{size}\n")
+            self._log_fh.write(f"{ts}\t{method}\t{fake}\t{path}\t{status}\t{size}\t{ct}\n")
         except OSError as exc:
             log.debug(f"[ACCESS] write failed: {exc}")
 
@@ -87,8 +106,6 @@ class DomainAliasAddon:
     def rw(self) -> dict:
         return self.cfg.get("rewrite", {})
 
-    # strip_hdrs: rebuilt on demand and cached; call _refresh_strip_hdrs() on
-    # hot-reload so we don't pay 10 × .lower() + set() per response.
     def _refresh_strip_hdrs(self):
         self._strip_hdrs_cache: set = {h.lower() for h in self.cfg.get("strip_headers", [])}
         self._strip_hdrs_gen = self._cfg_gen
@@ -102,7 +119,7 @@ class DomainAliasAddon:
     def notify_reload(self):
         """Call after a hot-reload so cached derived values are invalidated."""
         self._cfg_gen += 1
-        self._init_access_log()  # re-opens access log if path/enable changed
+        self._init_access_log()
 
     @property
     def body_size_limit(self) -> int:
@@ -116,8 +133,6 @@ class DomainAliasAddon:
         if real is None:
             return
 
-        # Stash the fake/real pair before we overwrite host, so response()
-        # can reliably retrieve it without relying on the mutated host value.
         flow.metadata[_META_FAKE] = host
         flow.metadata[_META_REAL] = real
 
@@ -125,7 +140,6 @@ class DomainAliasAddon:
         flow.request.host            = real
         flow.request.headers["Host"] = real
 
-        # Snapshot cfg-derived values once to avoid repeated dict lookups.
         rw = self.rw
 
         if rw.get("headers", True):
@@ -139,7 +153,6 @@ class DomainAliasAddon:
             if raw_cookie:
                 flow.request.headers["cookie"] = self.aliases.rewrite_fake_to_real(raw_cookie)
 
-        # Rewrite request body — handles both plain and compressed bodies
         if flow.request.content:
             ct  = flow.request.headers.get("content-type",     "").lower()
             enc = flow.request.headers.get("content-encoding", "").lower()
@@ -147,38 +160,39 @@ class DomainAliasAddon:
                 try:
                     raw = flow.request.content
                     if enc and enc != "identity":
-                        decompressed, did_decompress = decompress(raw, enc)
+                        decompressed, did_decompress, actual_enc = decompress(raw, enc)
                     else:
-                        decompressed, did_decompress = raw, False
+                        decompressed, did_decompress, actual_enc = raw, False, enc
 
-                    body_text = decompressed.decode("utf-8", errors="replace")
-                    new_text  = self.aliases.rewrite_fake_to_real(body_text)
-                    if new_text != body_text:
-                        new_bytes = new_text.encode("utf-8")
-                        if did_decompress and enc:
-                            new_bytes = recompress(new_bytes, enc)
-                        elif did_decompress:
-                            del flow.request.headers["content-encoding"]
-                        flow.request.content                   = new_bytes
-                        flow.request.headers["content-length"] = str(len(new_bytes))
+                    if any(n in decompressed.lower() for n in self.aliases._fake_needles):
+                        body_text = decompressed.decode("utf-8", errors="replace")
+                        new_text  = self.aliases.rewrite_fake_to_real(body_text)
+                        if new_text != body_text:
+                            new_bytes = new_text.encode("utf-8")
+                            if did_decompress and actual_enc:
+                                new_bytes = recompress(new_bytes, actual_enc)
+                            elif did_decompress:
+                                del flow.request.headers["content-encoding"]
+                            flow.request.content                   = new_bytes
+                            flow.request.headers["content-length"] = str(len(new_bytes))
                 except Exception as exc:
                     log.debug(f"[REQ body] {exc}")
                     self.stats.error(flow.metadata.get(_META_FAKE, host))
 
+        if self.cfg.get("capture_requests", False):
+            self._capture_body("req", host, flow.request.method,
+                               flow.request.path, flow.request.content)
+
     # ── incoming: real → fake ─────────────────────────────────────────────────
 
     def response(self, flow: mhttp.HTTPFlow):
-        # Read fake/real from metadata stamped in request() — never from the
-        # mutated flow.request.host, which is already the real upstream domain.
         fake = flow.metadata.get(_META_FAKE)
         if fake is None:
             return
 
-        # Snapshot cfg-derived values once per response to avoid repeated reads.
         rw         = self.rw
         strip_hdrs = self.strip_hdrs
 
-        # Strip security/HSTS/CSP headers that would break the fake domain
         for hdr in list(flow.response.headers.keys()):
             if hdr.lower() in strip_hdrs:
                 del flow.response.headers[hdr]
@@ -189,6 +203,7 @@ class DomainAliasAddon:
         if rw.get("cookies", True):
             self._rewrite_cookies(flow, fake)
 
+        ct = flow.response.headers.get("content-type", "").lower()
         try:
             bytes_rw = self._rewrite_body(flow, rw)
         except Exception as exc:
@@ -196,16 +211,78 @@ class DomainAliasAddon:
             self.stats.error(fake)
             bytes_rw = 0
 
-        self.stats.hit(fake, bytes_rw)
+        self.stats.hit(fake, bytes_rw, content_type=_ct_bucket(ct))
         self._write_access(
             flow.request.method,
             fake,
             flow.request.path,
             flow.response.status_code,
             len(flow.response.content or b""),
+            ct.split(";")[0].strip(),
         )
 
+        if self.cfg.get("capture_responses", False):
+            self._capture_body("resp", fake, flow.request.method,
+                               flow.request.path, flow.response.content)
+
+        self._inject(flow, fake)
+
     # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _capture_body(self, direction: str, fake: str, method: str,
+                       path: str, body: Optional[bytes]):
+        """Dump request or response body to evil_data/captures/<fake>/."""
+        if not body:
+            return
+        data_dir = Path(self.cfg.get("data_dir", "evil_data"))
+        cap_dir  = data_dir / "captures" / fake
+        try:
+            cap_dir.mkdir(parents=True, exist_ok=True)
+            ts    = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            slug  = re.sub(r"[^\w\-]", "_", path[:40].lstrip("/")) or "root"
+            fname = f"{ts}_{direction}_{method}_{slug}.bin"
+            (cap_dir / fname).write_bytes(body)
+            log.debug(f"[CAPTURE] {direction} {fake} → {cap_dir / fname}")
+        except OSError as exc:
+            log.debug(f"[CAPTURE] write failed: {exc}")
+
+    def _inject(self, flow: mhttp.HTTPFlow, fake: str):
+        """Inject snippet HTML/JS into HTML responses if configured.
+
+        Config example::
+
+            "inject": {
+                "mybook.local": "<script>console.log('injected')</script>",
+                "*": "<!-- proxyevil -->"
+            }
+        """
+        inject_map = self.cfg.get("inject", {})
+        snippet    = inject_map.get(fake) or inject_map.get("*")
+        if not snippet:
+            return
+        ct = flow.response.headers.get("content-type", "").lower()
+        if "text/html" not in ct:
+            return
+        body = flow.response.content
+        if not body:
+            return
+        try:
+            charset = "utf-8"
+            if "charset=" in ct:
+                charset = ct.split("charset=")[-1].split(";")[0].strip() or "utf-8"
+            text = body.decode(charset, errors="replace")
+            if "</body>" in text:
+                text = text.replace("</body>", snippet + "\n</body>", 1)
+            elif "</html>" in text:
+                text = text.replace("</html>", snippet + "\n</html>", 1)
+            else:
+                text = text + snippet
+            new_bytes = text.encode(charset, errors="replace")
+            flow.response.content                   = new_bytes
+            flow.response.headers["content-length"] = str(len(new_bytes))
+            log.debug(f"[INJECT] injected {len(snippet)} chars into {fake}")
+        except Exception as exc:
+            log.debug(f"[INJECT] failed for {fake}: {exc}")
 
     def _rewrite_response_headers(self, flow: mhttp.HTTPFlow):
         for hdr in ("location", "refresh", "link", "content-location",
@@ -241,9 +318,8 @@ class DomainAliasAddon:
             if fake_is_http:
                 new_attrs = re.sub(r'(?i);\s*Secure\b', '', new_attrs)
             elif not re.search(r'(?i);\s*Secure\b', new_attrs):
-                # Add Secure when the fake domain is HTTPS but upstream omitted it.
                 new_attrs += "; Secure"
-            if not re.search(r'(?i);\s*SameSite=', new_attrs):
+            if not re.search(r'(?i);\s*SameSite\s*=', new_attrs):
                 new_attrs += "; SameSite=Lax"
             new_cookies.append(new_name_val + new_attrs)
 
@@ -285,15 +361,12 @@ class DomainAliasAddon:
             return 0
 
         if enc and enc != "identity":
-            decompressed, did_decompress = decompress(raw, enc)
+            decompressed, did_decompress, actual_enc = decompress(raw, enc)
         else:
-            decompressed, did_decompress = raw, False
+            decompressed, did_decompress, actual_enc = raw, False, enc
 
-        active_enc = enc if (enc and enc != "identity" and did_decompress) else ""
+        active_enc = actual_enc if (did_decompress and actual_enc and actual_enc != "identity") else ""
 
-        # Domain pre-check: scan byte needles before decoding the full body.
-        # _real_needles are ASCII-encoded domain names; bytes.find() is safe and
-        # far cheaper than a full regex scan when there's nothing to rewrite.
         dec_lower = decompressed.lower()
         if not any(n in dec_lower for n in self.aliases._real_needles):
             return 0
@@ -307,8 +380,6 @@ class DomainAliasAddon:
         except Exception:
             text = decompressed.decode("utf-8", errors="replace")
 
-        # SRI stripping happens AFTER the pre-check confirms real domains exist
-        # in the body, avoiding a full regex scan of megabytes for nothing.
         if is_html and rw.get("html", True):
             text = _SRI_RE.sub("", text)
 

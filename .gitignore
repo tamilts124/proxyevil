@@ -1,0 +1,52 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ── proxyevil runtime output ──────────────────────────────────────────────────
+
+# Generated TLS certs (created by --setup / mkcert).
+# Never commit private keys; keep the dir itself via .gitkeep if needed.
+certs/
+!certs/.gitkeep
+
+# Runtime data: access log, mitmproxy config/state, stats dumps
+evil_data/
+
+# Content-hash stamp files written alongside combined PEMs (certs.py)
+*.md5
+
+# ── Config — keep the example, ignore local overrides ────────────────────────
+# config.json is tracked as a documented example.
+# If you split out a local override, add its pattern here, e.g.:
+# config.local.json
+
+# ── Tools & editors ───────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Testing & coverage ────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/

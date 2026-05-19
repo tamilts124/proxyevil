@@ -4,6 +4,7 @@ watchfiles>=0.21.0           # inotify-backed config hot-reload; falls back grac
 
 # Optional but strongly recommended
 brotli>=1.0.9                # brotli response decompression; without this, br-encoded bodies won't be rewritten
+zstandard>=0.21.0            # zstd response decompression; without this, zstd-encoded bodies (Cloudflare etc.) won't be rewritten
 
 # External tool (not a pip package — install separately):
 #   mkcert  https://github.com/FiloSottile/mkcert/releases

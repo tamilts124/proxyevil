@@ -20,6 +20,7 @@ def start_config_watcher(
     alias_map:   AliasMap,
     live_cfg:    dict,
     stats:       Optional[Stats] = None,
+    addon:       object          = None,
 ) -> Optional[threading.Thread]:
     """Watch *config_path* and hot-reload aliases + rewrite config on change.
 
@@ -29,6 +30,10 @@ def start_config_watcher(
 
     If *stats* is provided, ``stats.init()`` is called after each reload so
     newly-added aliases appear in the dashboard immediately.
+
+    If *addon* is provided, ``addon.notify_reload()`` is called after each
+    successful reload so cached derived values (e.g. strip_hdrs) are
+    invalidated.
 
     Returns the watcher thread (daemon) or None if watchfiles is not installed.
     """
@@ -52,6 +57,9 @@ def start_config_watcher(
                 live_cfg.update(merged)
                 if stats is not None:
                     stats.init(alias_map.stats_keys)
+                # Invalidate addon caches (e.g. strip_hdrs) after cfg swap.
+                if addon is not None and hasattr(addon, "notify_reload"):
+                    addon.notify_reload()
                 log.info(f"[WATCH] config reloaded — {len(new_aliases)} aliases")
             except SystemExit:
                 # load_config / _validate calls sys.exit(1) on bad config.
