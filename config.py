@@ -24,6 +24,19 @@ DEFAULTS: dict = {
     "cert_dir":       "certs",
     "verbose":        False,
     "access_log":     False,
+    # Token required on mutating sidecar endpoints (POST /reload, POST /alias,
+    # DELETE /alias, POST /reset, POST /stats/save).  Empty string disables
+    # the check — safe for local-only setups that bind to 127.0.0.1.
+    # Set to a random string to protect against cross-process exploitation.
+    "sidecar_token":  "",
+    # Auto-install mitmproxy CA into the Windows Trusted Root Store on first
+    # run.  Disabled by default — installing a root CA is a significant
+    # security action that should be an explicit opt-in.  Run --setup and
+    # `mkcert -install` instead, or set this to true for fully automated
+    # environments where you understand the implications.
+    "auto_install_ca": False,
+    "SPOOF_ALL_DOMAINS": False,
+    "SPOOFING_EXCLUDE_LIST": [],
     "aliases":        {},
     "rewrite": {
         "html":    True,
@@ -68,7 +81,6 @@ def load_config(path: Optional[str] = None) -> dict:
         sys.exit(1)
 
     log.info(f"[CFG] loaded → {p}")
-    _validate(cfg)
     _warn_schema_version(cfg)
 
     # Merge top-level defaults so every key is present
@@ -76,6 +88,21 @@ def load_config(path: Optional[str] = None) -> dict:
     merged.update(cfg)
     # Deep-merge the rewrite sub-dict
     merged["rewrite"] = {**DEFAULTS["rewrite"], **cfg.get("rewrite", {})}
+
+    # Fix #14 / #22: normalize SCREAMING_SNAKE keys BEFORE validation so
+    # _validate always sees canonical key names.
+    # Accepts legacy "SPOOF_ALL_UNMAPPED_DOMAINS" as alias for "SPOOF_ALL_DOMAINS".
+    if merged.get("SPOOF_ALL_UNMAPPED_DOMAINS") and not merged.get("SPOOF_ALL_DOMAINS"):
+        merged["SPOOF_ALL_DOMAINS"] = bool(merged["SPOOF_ALL_UNMAPPED_DOMAINS"])
+    # Normalize per-alias keys too
+    for fake, val in merged.get("aliases", {}).items():
+        if isinstance(val, dict):
+            if "SPOOF_ALL_UNMAPPED_DOMAINS" in val and "SPOOF_ALL_DOMAINS" not in val:
+                val["SPOOF_ALL_DOMAINS"] = bool(val["SPOOF_ALL_UNMAPPED_DOMAINS"])
+            if "extra_real" in val and "EXTRA_REAL_DOMAINS_TO_SPOOF" not in val:
+                val["EXTRA_REAL_DOMAINS_TO_SPOOF"] = val["extra_real"]
+
+    _validate(merged)
     return merged
 
 
@@ -120,6 +147,29 @@ def _validate(cfg: dict):
         if not isinstance(mbb, int) or mbb < 1024:
             errors.append(f"  'max_body_bytes' must be an integer >= 1024, got {mbb!r}")
 
+    # sidecar_token validation
+    token = cfg.get("sidecar_token")
+    if token is not None and not isinstance(token, str):
+        errors.append(f"  'sidecar_token' must be a string (or omitted), got {token!r}")
+
+    # auto_install_ca validation
+    aic = cfg.get("auto_install_ca")
+    if aic is not None and not isinstance(aic, bool):
+        errors.append(f"  'auto_install_ca' must be a boolean, got {aic!r}")
+
+    # SPOOF_ALL_DOMAINS validation (global)
+    sad = cfg.get("SPOOF_ALL_DOMAINS")
+    if sad is not None and not isinstance(sad, bool):
+        errors.append(f"  'SPOOF_ALL_DOMAINS' must be a boolean, got {sad!r}")
+
+    # SPOOFING_EXCLUDE_LIST validation
+    sel = cfg.get("SPOOFING_EXCLUDE_LIST")
+    if sel is not None:
+        if not isinstance(sel, list):
+            errors.append(f"  'SPOOFING_EXCLUDE_LIST' must be a list of strings, got {sel!r}")
+        elif not all(isinstance(x, str) for x in sel):
+            errors.append(f"  'SPOOFING_EXCLUDE_LIST' must only contain strings, got {sel!r}")
+
     aliases = cfg.get("aliases", {})
     for fake, val in aliases.items():
         if not isinstance(val, (str, dict)):
@@ -127,10 +177,32 @@ def _validate(cfg: dict):
                 f"  alias '{fake}' has unexpected value type {type(val).__name__!r} "
                 f"(expected a string or a dict with a 'real' key)"
             )
-        elif isinstance(val, dict) and "real" not in val and val.get("enabled", True):
-            errors.append(
-                f"  alias '{fake}' is a dict but is missing the required 'real' key"
-            )
+        elif isinstance(val, dict):
+            if "real" not in val and val.get("enabled", True):
+                errors.append(
+                    f"  alias '{fake}' is a dict but is missing the required 'real' key"
+                )
+            # Check EXTRA_REAL_DOMAINS_TO_SPOOF (or legacy extra_real)
+            extra_key = "EXTRA_REAL_DOMAINS_TO_SPOOF" if "EXTRA_REAL_DOMAINS_TO_SPOOF" in val else "extra_real"
+            extra_val = val.get(extra_key)
+            if extra_val is not None:
+                if not isinstance(extra_val, list):
+                    errors.append(f"  alias '{fake}' key '{extra_key}' must be a list of domains, got {extra_val!r}")
+                elif not all(isinstance(x, str) for x in extra_val):
+                    errors.append(f"  alias '{fake}' key '{extra_key}' must only contain strings, got {extra_val!r}")
+            # Check SPOOF_ALL_DOMAINS (per-alias) — canonical key only after normalization
+            # Fix I: SPOOF_ALL_UNMAPPED_DOMAINS fallback removed; config.py normalises it
+            # to SPOOF_ALL_DOMAINS before _validate runs, so the legacy key is never seen.
+            sad_alias = val.get("SPOOF_ALL_DOMAINS")
+            if sad_alias is not None and not isinstance(sad_alias, bool):
+                errors.append(f"  alias '{fake}' key 'SPOOF_ALL_DOMAINS' must be a boolean, got {sad_alias!r}")
+            # Check SPOOFING_EXCLUDE_LIST (per-alias)
+            sel_alias = val.get("SPOOFING_EXCLUDE_LIST")
+            if sel_alias is not None:
+                if not isinstance(sel_alias, list):
+                    errors.append(f"  alias '{fake}' key 'SPOOFING_EXCLUDE_LIST' must be a list of strings, got {sel_alias!r}")
+                elif not all(isinstance(x, str) for x in sel_alias):
+                    errors.append(f"  alias '{fake}' key 'SPOOFING_EXCLUDE_LIST' must only contain strings, got {sel_alias!r}")
 
     if errors:
         print("[ERROR] config.json has structural errors that would crash at runtime:")

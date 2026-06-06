@@ -9,3 +9,14 @@ zstandard>=0.21.0            # zstd response decompression; without this, zstd-e
 # External tool (not a pip package — install separately):
 #   mkcert  https://github.com/FiloSottile/mkcert/releases
 #   After installing: mkcert -install   (run once, as Administrator on Windows)
+
+# ── Reproducible installs ──────────────────────────────────────────────────────
+# To generate a lock file for exact reproducible installs:
+#   pip install pip-tools
+#   pip-compile requirements.txt -o requirements-lock.txt
+#
+# To install from the lock file:
+#   pip install -r requirements-lock.txt
+#
+# Commit requirements-lock.txt to version control to prevent silent mitmproxy
+# or dependency version surprises between environments.

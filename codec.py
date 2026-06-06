@@ -6,6 +6,7 @@ can work on plain text regardless of what the upstream sent.
 """
 
 import gzip
+import io
 import logging
 import zlib
 from typing import Tuple
@@ -15,6 +16,10 @@ log = logging.getLogger("proxyevil.codec")
 # Maximum decompressed output size (64 MB).  Checked for brotli and zstd which
 # don't expose a streaming API here; gzip/deflate raise MemoryError naturally.
 _MAX_DECOMP = 64 * 1024 * 1024
+
+# Brotli quality used for recompression.  Upstream servers typically use 4-6;
+# the library default of 11 (max) is too slow on large bodies.
+_BROTLI_QUALITY = 6
 
 
 def decompress(data: bytes, encoding: str) -> Tuple[bytes, bool, str]:
@@ -29,7 +34,17 @@ def decompress(data: bytes, encoding: str) -> Tuple[bytes, bool, str]:
     enc = encoding.lower()
     try:
         if enc == "gzip":
-            return gzip.decompress(data), True, enc
+            buf = io.BytesIO()
+            with gzip.GzipFile(fileobj=io.BytesIO(data)) as gf:
+                while True:
+                    chunk = gf.read(65536)
+                    if not chunk:
+                        break
+                    buf.write(chunk)
+                    if buf.tell() > _MAX_DECOMP:
+                        log.warning(f"[CODEC] gzip decompressed size exceeds limit {_MAX_DECOMP} — skipping")
+                        return data, False, enc
+            return buf.getvalue(), True, enc
         if enc in ("deflate", "zlib"):
             try:
                 return zlib.decompress(data), True, "deflate"
@@ -59,8 +74,12 @@ def decompress(data: bytes, encoding: str) -> Tuple[bytes, bool, str]:
     return data, False, enc
 
 
-def recompress(data: bytes, encoding: str) -> bytes:
-    """Recompress *data* using *encoding*. Returns original bytes on failure.
+def recompress(data: bytes, encoding: str) -> Tuple[bytes, bool]:
+    """Recompress *data* using *encoding*.
+
+    Returns ``(bytes, success)``.  On failure ``success`` is ``False`` and the
+    caller should drop the Content-Encoding header and serve the data as-is
+    rather than setting a wrong Content-Length.
 
     Accepts ``'deflate-raw'`` (returned by ``decompress()`` when the upstream
     used raw deflate without the zlib wrapper) and mirrors it faithfully.
@@ -68,26 +87,26 @@ def recompress(data: bytes, encoding: str) -> bytes:
     enc = encoding.lower()
     try:
         if enc == "gzip":
-            return gzip.compress(data)
+            return gzip.compress(data), True
         if enc == "deflate":
-            return zlib.compress(data)
+            return zlib.compress(data), True
         if enc == "deflate-raw":
             # Recompress as raw deflate (no zlib header/trailer) to match what
             # the server originally sent and what the client expects.
             co = zlib.compressobj(wbits=-zlib.MAX_WBITS)
-            return co.compress(data) + co.flush()
+            return co.compress(data) + co.flush(), True
         if enc == "br":
             try:
                 import brotli  # type: ignore
-                return brotli.compress(data)
+                return brotli.compress(data, quality=_BROTLI_QUALITY), True
             except ImportError:
-                return data
+                return data, False
         if enc == "zstd":
             try:
                 import zstandard as zstd  # type: ignore
-                return zstd.ZstdCompressor().compress(data)
+                return zstd.ZstdCompressor().compress(data), True
             except ImportError:
-                return data
+                return data, False
     except Exception as exc:
         log.debug(f"[CODEC] recompress({encoding}) failed: {exc}")
-    return data
+    return data, False

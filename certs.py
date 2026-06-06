@@ -68,6 +68,7 @@ def collect_certs(aliases: dict, cert_dir: str) -> list[tuple[str, str]]:
     """
     p     = Path(cert_dir)
     pairs = []
+    total  = len(aliases)
     for fake in aliases.keys():
         cert_file = p / f"{fake}.pem"
         key_file  = p / f"{fake}-key.pem"
@@ -94,6 +95,14 @@ def collect_certs(aliases: dict, cert_dir: str) -> list[tuple[str, str]]:
             log.debug(f"[CERT] loaded cert for {fake}")
         else:
             log.debug(f"[CERT] no cert found for {fake} — mitmproxy will use its own CA leaf")
+    # Fix #17: emit a visible INFO summary when some aliases lack certs so the
+    # silent CA fallback doesn’t go unnoticed at normal log levels.
+    missing = total - len(pairs)
+    if missing > 0:
+        log.info(
+            f"[CERT] {len(pairs)}/{total} alias(es) using mkcert certs; "
+            f"{missing} will use mitmproxy CA (run --setup to generate missing certs)"
+        )
     return pairs
 
 

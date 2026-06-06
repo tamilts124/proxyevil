@@ -42,6 +42,18 @@ logging.basicConfig(
 log = logging.getLogger("proxyevil")
 
 
+# Fix #12: warn early about missing optional codec dependencies
+def _warn_missing_codecs():
+    try:
+        import brotli  # noqa: F401
+    except ImportError:
+        log.warning("[CODEC] brotli not installed — brotli-encoded bodies will pass through unrewritten. Run: pip install brotli")
+    try:
+        import zstandard  # noqa: F401
+    except ImportError:
+        log.warning("[CODEC] zstandard not installed — zstd-encoded bodies (Cloudflare etc.) will pass through unrewritten. Run: pip install zstandard")
+
+
 # ── Banner ─────────────────────────────────────────────────────────────────────
 
 def _print_banner(host: str, port: int, sidecar_port: int,
@@ -82,7 +94,7 @@ def _run_check(aliases: dict, cert_dir: str, cfg: dict):
     for fake, val in sorted(aliases.items()):
         real      = val if isinstance(val, str) else val.get("real", "?")
         cert_ok   = (cert_p / f"{fake}.pem").exists() and (cert_p / f"{fake}-key.pem").exists()
-        cert_stat = "✓ present" if cert_ok else "✗ missing  (run --setup)"
+        cert_stat = "[OK] present" if cert_ok else "[MISSING] (run --setup)"
         if not cert_ok:
             ok = False
         print(f"{fake:<{w}}  {real:<30}  {cert_stat}")
@@ -95,15 +107,17 @@ def _run_check(aliases: dict, cert_dir: str, cfg: dict):
     print(f"Strip headers: {len(cfg.get('strip_headers', []))}")
     print(f"Access log   : {'on' if cfg.get('access_log') else 'off'}")
     print(f"Verbose      : {'on' if cfg.get('verbose') else 'off'}")
+    token = cfg.get("sidecar_token", "")
+    print(f"Sidecar auth : {'on (token set)' if token else 'off (no token configured)'}")
     print()
     if ok:
-        print("✓ Config looks good.")
+        print("[PASS] Config looks good.")
     else:
-        print("⚠  Issues found — see above.")
+        print("[WARNING] Issues found - see above.")
     sys.exit(0 if ok else 1)
 
 
-# ── --export ───────────────────────────────────────────────────────────────────
+# ── --stats ────────────────────────────────────────────────────────────────────
 
 def _run_stats(stats_path):
     """Print a human-readable stats summary from the last saved dump and exit."""
@@ -133,13 +147,8 @@ def _run_stats(stats_path):
     sys.exit(0)
 
 
-def _run_export(aliases: dict, export_dir: str, host: str, proxy_port: int):
-    """Write hosts block and PAC file to *export_dir* and exit.
-
-    Creates the directory if it does not exist.  Writes:
-      hosts.txt      — /etc/hosts block for all alias domains
-      proxy.pac      — PAC file routing only alias domains through the proxy
-    """
+def _run_export(aliases: dict, export_dir: str, host: str, proxy_port: int, cfg: dict):
+    """Write hosts block and PAC file to *export_dir* and exit."""
     out = Path(export_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -150,7 +159,12 @@ def _run_export(aliases: dict, export_dir: str, host: str, proxy_port: int):
     hosts_path.write_text(hosts_text, encoding="utf-8")
     print(f"[EXPORT] hosts   → {hosts_path.resolve()}")
 
-    pac_text = _pac_file(aliases, host, proxy_port)
+    # Fix #13: use canonical SPOOF_ALL_DOMAINS key (config.py normalises legacy key on load)
+    spoof_all = cfg.get("SPOOF_ALL_DOMAINS", False) or any(
+        isinstance(v, dict) and v.get("SPOOF_ALL_DOMAINS", False)
+        for v in aliases.values()
+    )
+    pac_text = _pac_file(aliases, host, proxy_port, spoof_all)
     pac_path.write_text(pac_text, encoding="utf-8")
     print(f"[EXPORT] pac     → {pac_path.resolve()}")
     print(f"[EXPORT] {len(aliases)} alias(es) exported.")
@@ -165,22 +179,19 @@ async def run_proxy(
     sidecar_port: int,
     alias_map:    AliasMap,
     cfg:          dict,
-    cert_dir:     str,
+    cert_dir:     "str | Path",  # Fix J: accept both str and Path consistently
     config_path:  Optional[str],
     stats:        Stats,
     stats_path:   Path,
 ):
     data_dir = Path(cfg.get("data_dir", "evil_data"))
     data_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Store the mitmproxy CA in cert_dir so deleting data_dir doesn't wipe the trusted CA
+
     p_cert_dir = Path(cert_dir)
     p_cert_dir.mkdir(parents=True, exist_ok=True)
     confdir = str(p_cert_dir / "mitmproxy_conf")
     Path(confdir).mkdir(parents=True, exist_ok=True)
 
-    # Collect mkcert-generated certs and wire them into mitmproxy so it
-    # presents the correct per-domain cert rather than its own CA leaf.
     cert_pairs = collect_certs(alias_map.mapping, cert_dir)
     if cert_pairs:
         log.info(f"[CERT] loading {len(cert_pairs)} mkcert cert(s) into mitmproxy")
@@ -201,102 +212,215 @@ async def run_proxy(
     start_sidecar(alias_map, stats, stats_path, host, port, sidecar_port, cfg, config_path or "", addon=_addon)
 
     if config_path:
-        start_config_watcher(config_path, alias_map, cfg, stats, addon=_addon)
+        start_config_watcher(config_path, alias_map, cfg, stats, addon=_addon,
+                             verbose=cfg.get("verbose", False))
 
-    # Install log noise suppression AFTER the master/addon are wired up but
-    # BEFORE we start serving, so the first requests are already filtered.
     verbose = cfg.get("verbose", False)
     install_log_filters(alias_map, verbose=verbose)
 
     _print_banner(host, port, sidecar_port, alias_map, data_dir, cert_dir)
 
-    # Graceful shutdown on SIGTERM (Docker / systemd) in addition to Ctrl-C
     loop = asyncio.get_running_loop()
+    _stats_dumped = False
+
+    def _dump_stats_once():
+        nonlocal _stats_dumped
+        if not _stats_dumped:
+            _stats_dumped = True
+            stats.dump(stats_path)
 
     def _on_sigterm(*_):
         log.info("[*] SIGTERM received — shutting down…")
-        stats.dump(stats_path)
+        _dump_stats_once()
         loop.call_soon_threadsafe(master.shutdown)
 
     try:
         signal.signal(signal.SIGTERM, _on_sigterm)
     except (OSError, ValueError):
-        pass  # Windows or non-main thread — best effort
-        
-    async def _auto_install_ca():
-        import os, subprocess
-        if os.name != 'nt':
-            return
-        
-        ca_path = Path(confdir) / "mitmproxy-ca-cert.cer"
-        marker_path = Path(confdir) / ".installed"
-        
-        # Wait up to 10 seconds for mitmproxy to generate the CA
-        for _ in range(20):
-            if ca_path.exists():
-                break
-            await asyncio.sleep(0.5)
-            
-        if ca_path.exists() and not marker_path.exists():
-            log.info(f"[CERT] Auto-installing {ca_path.name} to Windows Trusted Root Store...")
-            try:
-                subprocess.run(
-                    ["certutil", "-addstore", "root", str(ca_path)],
-                    check=True, capture_output=True
-                )
-                marker_path.touch()
-                log.info(f"[CERT] ✓ CA Certificate successfully installed!")
-            except subprocess.CalledProcessError as e:
-                log.warning(f"[CERT] Auto-install failed: {e.stderr.decode('utf-8', errors='ignore')}")
+        pass
 
-    loop.create_task(_auto_install_ca())
+    if cfg.get("auto_install_ca", False):
+        async def _auto_install_ca():
+            import os, subprocess
+            if os.name != 'nt':
+                return
+            ca_path     = Path(confdir) / "mitmproxy-ca-cert.cer"
+            marker_path = Path(confdir) / ".ca_installed"
+            for _ in range(20):
+                if ca_path.exists():
+                    break
+                await asyncio.sleep(0.5)
+            if ca_path.exists() and not marker_path.exists():
+                log.info(f"[CERT] Auto-installing {ca_path.name} to Windows Trusted Root Store "
+                         f"(auto_install_ca=true in config)...")
+                try:
+                    subprocess.run(
+                        ["certutil", "-addstore", "root", str(ca_path)],
+                        check=True, capture_output=True,
+                    )
+                    marker_path.touch()
+                    log.info("[CERT] ✓ CA Certificate successfully installed!")
+                except subprocess.CalledProcessError as e:
+                    stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ""
+                    log.warning(f"[CERT] Auto-install failed: {stderr}")
+        loop.create_task(_auto_install_ca())
+    else:
+        log.debug("[CERT] auto_install_ca is false — skipping automatic CA installation")
 
     try:
         await master.run()
     except KeyboardInterrupt:
         print("\n[*] Stopping proxyevil…")
-        stats.dump(stats_path)
+        _dump_stats_once()
         master.shutdown()
+
+
+# ── CLI helpers (#23: split main() into focused sub-functions) ────────────────
+
+def _apply_cli_mutations(args, cfg: dict, aliases: dict, config_path: str) -> dict:
+    """Apply --add-alias / --remove-alias / --disable-alias / --enable-alias.
+    Returns the (possibly mutated) aliases dict.
+    """
+    # Fix #8: config_path is now passed in — no need to recompute here.
+    if args.add_alias:
+        fake, real        = args.add_alias
+        aliases[fake.lower()] = real.lower()
+        log.info(f"[ALIAS] added: {fake} \u2192 {real}")
+        if args.save:
+            cfg["aliases"][fake.lower()] = real.lower()
+            save_config(cfg, config_path)
+
+    if args.remove_alias:
+        key = args.remove_alias.lower()
+        if key in aliases:
+            del aliases[key]
+            log.info(f"[ALIAS] removed: {key}")
+            if args.save:
+                cfg["aliases"].pop(key, None)
+                save_config(cfg, config_path)
+        else:
+            print(f"[WARN] --remove-alias: '{key}' not found in aliases")
+
+    if args.disable_alias:
+        key = args.disable_alias.lower()
+        raw_aliases = dict(cfg.get("aliases", {}))  # copy — don't mutate live cfg unless --save
+        if key in raw_aliases:
+            val = raw_aliases[key]
+            if isinstance(val, str):
+                raw_aliases[key] = {"real": val, "enabled": False}
+            else:
+                raw_aliases[key] = dict(val)
+                raw_aliases[key]["enabled"] = False
+            log.info(f"[ALIAS] disabled: {key}")
+            if args.save:
+                cfg["aliases"] = raw_aliases
+                save_config(cfg, config_path)
+            aliases = {k: v for k, v in raw_aliases.items()
+                       if not (isinstance(v, dict) and not v.get("enabled", True))}
+        else:
+            print(f"[WARN] --disable-alias: '{key}' not found in aliases")
+
+    if args.enable_alias:
+        key = args.enable_alias.lower()
+        raw_aliases = dict(cfg.get("aliases", {}))  # copy — don't mutate live cfg unless --save
+        if key in raw_aliases:
+            val = raw_aliases[key]
+            if isinstance(val, dict):
+                val = dict(val)
+                val["enabled"] = True
+                raw_aliases[key] = val
+            log.info(f"[ALIAS] enabled: {key}")
+            if args.save:
+                cfg["aliases"] = raw_aliases
+                save_config(cfg, config_path)
+            aliases = {k: v for k, v in raw_aliases.items()
+                       if not (isinstance(v, dict) and not v.get("enabled", True))}
+        else:
+            print(f"[WARN] --enable-alias: '{key}' not found in aliases")
+
+    return aliases
+
+
+def _run_info_commands(args, aliases: dict,
+                       host: str, port: int, cert_dir: str, cfg: dict):
+    """Handle all info/setup-only flags (all exit when matched).
+    Fix #18: AliasMap is not built before this runs — none of these paths need it.
+    """
+
+    if args.hosts:
+        print(_hosts_block(aliases))
+        sys.exit(0)
+
+    if args.export:
+        _run_export(aliases, args.export, host, port, cfg)
+
+    if args.check:
+        _run_check(aliases, cert_dir, cfg)
+
+    if args.list:
+        w = max((len(f) for f in aliases), default=20)
+        print(f"{'Fake domain':<{w}}  \u2192  Real upstream")
+        print("-" * (w + 20))
+        for fake, val in sorted(aliases.items()):
+            real       = val if isinstance(val, str) else val["real"]
+            extra_list = [] if isinstance(val, str) else (val.get("EXTRA_REAL_DOMAINS_TO_SPOOF") or val.get("extra_real") or [])
+            print(f"{fake:<{w}}  \u2192  {real}")
+            for e in extra_list:
+                print(f"  {'(cdn)':<{w - 2}}       {e}")
+        sys.exit(0)
+
+    if args.list_certs:
+        list_certs(cert_dir)
+        sys.exit(0)
+
+    if args.setup:
+        setup_certs(aliases, cert_dir)
+        sys.exit(0)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main():
-    if not is_admin():
-        print("[ERROR] proxyevil must be run as Administrator/root to modify the hosts file.")
-        print("        Please restart your terminal in elevated mode.")
-        sys.exit(1)
-
+    # Fix #20: parse args before the admin check so --no-hosts can skip it.
     parser = argparse.ArgumentParser(
         description="proxyevil — domain-alias MITM proxy",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--version",      "-V", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--config",       "-c", default=None,     help="Path to config.json")
-    parser.add_argument("--host",               default=None,     help="Listen host (default 127.0.0.1)")
-    parser.add_argument("--port",         "-p", type=int,         help="Proxy port (default 8080)")
-    parser.add_argument("--sidecar-port",       type=int,         help="Status/PAC port (default 8081)")
-    parser.add_argument("--setup",        action="store_true",    help="Generate TLS certs then exit")
-    parser.add_argument("--check",        action="store_true",    help="Validate config and cert status then exit")
-    parser.add_argument("--hosts",        action="store_true",    help="Print /etc/hosts block then exit")
-    parser.add_argument("--list",         action="store_true",    help="List configured aliases then exit")
-    parser.add_argument("--list-certs",   action="store_true",    help="List generated TLS certs then exit")
-    parser.add_argument("--add-alias",    nargs=2, metavar=("FAKE", "REAL"),
+    parser.add_argument("--version",       "-V", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--config",        "-c", default=None,     help="Path to config.json")
+    parser.add_argument("--host",                default=None,     help="Listen host (default 127.0.0.1)")
+    parser.add_argument("--port",          "-p", type=int,         help="Proxy port (default 8080)")
+    parser.add_argument("--sidecar-port",        type=int,         help="Status/PAC port (default 8081)")
+    parser.add_argument("--setup",         action="store_true",    help="Generate TLS certs then exit")
+    parser.add_argument("--check",         action="store_true",    help="Validate config and cert status then exit")
+    parser.add_argument("--hosts",         action="store_true",    help="Print /etc/hosts block then exit")
+    parser.add_argument("--no-hosts",      action="store_true",
+                        help="Skip hosts file modification (allows running without Administrator/root)")
+    parser.add_argument("--list",          action="store_true",    help="List configured aliases then exit")
+    parser.add_argument("--list-certs",    action="store_true",    help="List generated TLS certs then exit")
+    parser.add_argument("--add-alias",     nargs=2, metavar=("FAKE", "REAL"),
                         help="Add a one-off alias (e.g. --add-alias mybook.local www.facebook.com)")
-    parser.add_argument("--remove-alias", metavar="FAKE",
+    parser.add_argument("--remove-alias",  metavar="FAKE",
                         help="Remove alias for FAKE domain (use with --save to persist)")
     parser.add_argument("--disable-alias", metavar="FAKE",
                         help="Disable alias (keeps config entry, sets enabled=false)")
-    parser.add_argument("--enable-alias", metavar="FAKE",
+    parser.add_argument("--enable-alias",  metavar="FAKE",
                         help="Re-enable a previously disabled alias")
-    parser.add_argument("--export", metavar="DIR",
+    parser.add_argument("--export",        metavar="DIR",
                         help="Export hosts block + PAC file to DIR and exit")
     parser.add_argument("--stats",         action="store_true",
                         help="Print per-alias stats summary then exit")
-    parser.add_argument("--save",         action="store_true",
+    parser.add_argument("--save",          action="store_true",
                         help="Persist --add-alias / --remove-alias to config.json")
-    parser.add_argument("--verbose",      "-v", action="store_true")
+    parser.add_argument("--verbose",       "-v", action="store_true")
     args = parser.parse_args()
+
+    # Fix #20: only require admin when hosts file will be written
+    needs_admin = not args.no_hosts
+    if needs_admin and not is_admin():
+        print("[ERROR] proxyevil must be run as Administrator/root to modify the hosts file.")
+        print("        Use --no-hosts to skip hosts file modification and run without elevation.")
+        sys.exit(1)
 
     config_path = args.config or str(Path(__file__).parent / "config.json")
     cfg         = load_config(config_path)
@@ -309,67 +433,11 @@ def main():
     if args.verbose or cfg.get("verbose"):
         logging.getLogger().setLevel(logging.DEBUG)
 
+    # Fix #12: warn about missing optional codecs before anything else
+    _warn_missing_codecs()
+
     aliases: dict = dict(cfg.get("aliases", {}))
-
-    if args.add_alias:
-        fake, real        = args.add_alias
-        aliases[fake.lower()] = real.lower()
-        log.info(f"[ALIAS] added: {fake} → {real}")
-        if args.save:
-            cfg["aliases"] = aliases
-            save_config(cfg, config_path)
-
-    if args.remove_alias:
-        key = args.remove_alias.lower()
-        if key in aliases:
-            del aliases[key]
-            # Also drop any extra_real entries whose value pointed at this fake.
-            # Without this they linger in AliasMap._real_to_fake until restart.
-            if isinstance(cfg.get("aliases", {}).get(key), dict):
-                for extra in cfg["aliases"][key].get("extra_real", []):
-                    aliases.pop(extra, None)
-            log.info(f"[ALIAS] removed: {key}")
-            if args.save:
-                cfg["aliases"] = aliases
-                save_config(cfg, config_path)
-        else:
-            print(f"[WARN] --remove-alias: '{key}' not found in aliases")
-
-    if args.disable_alias:
-        key = args.disable_alias.lower()
-        raw_aliases = cfg.get("aliases", {})
-        if key in raw_aliases:
-            val = raw_aliases[key]
-            if isinstance(val, str):
-                raw_aliases[key] = {"real": val, "enabled": False}
-            else:
-                raw_aliases[key]["enabled"] = False
-            log.info(f"[ALIAS] disabled: {key}")
-            if args.save:
-                cfg["aliases"] = raw_aliases
-                save_config(cfg, config_path)
-            # Refresh working aliases dict used for this run
-            aliases = {k: v for k, v in raw_aliases.items()
-                       if not (isinstance(v, dict) and not v.get("enabled", True))}
-        else:
-            print(f"[WARN] --disable-alias: '{key}' not found in aliases")
-
-    if args.enable_alias:
-        key = args.enable_alias.lower()
-        raw_aliases = cfg.get("aliases", {})
-        if key in raw_aliases:
-            val = raw_aliases[key]
-            if isinstance(val, dict):
-                val["enabled"] = True
-                raw_aliases[key] = val
-            log.info(f"[ALIAS] enabled: {key}")
-            if args.save:
-                cfg["aliases"] = raw_aliases
-                save_config(cfg, config_path)
-            aliases = {k: v for k, v in raw_aliases.items()
-                       if not (isinstance(v, dict) and not v.get("enabled", True))}
-        else:
-            print(f"[WARN] --enable-alias: '{key}' not found in aliases")
+    aliases = _apply_cli_mutations(args, cfg, aliases, config_path)
 
     if not aliases:
         print("[ERROR] No aliases configured.")
@@ -377,50 +445,24 @@ def main():
         print("        Or: python proxy.py --add-alias mybook.local www.facebook.com")
         sys.exit(1)
 
-    alias_map = AliasMap(aliases)
-    
-    # Update hosts file with initial mapping
-    update_hosts_file(alias_map.mapping)
-    
-    stats     = Stats()
-    stats.init(alias_map.stats_keys)
-
-    # Restore stats from the previous run if the dump file exists.
+    # Fix #3: resolve stats_path and check --stats BEFORE building AliasMap
+    # (avoids building the map for a read-only stats query)
     stats_path = Path(cfg.get("data_dir", "evil_data")) / "stats.json"
-    stats.load(stats_path)
-
-    if args.hosts:
-        print(_hosts_block(aliases))
-        sys.exit(0)
-
-    if args.export:
-        _run_export(aliases, args.export, host, port)
-
-    if args.check:
-        _run_check(aliases, cert_dir, cfg)
-
-    if args.list:
-        w = max((len(f) for f in aliases), default=20)
-        print(f"{'Fake domain':<{w}}  →  Real upstream")
-        print("-" * (w + 20))
-        for fake, val in sorted(aliases.items()):
-            real   = val if isinstance(val, str) else val["real"]
-            extras = [] if isinstance(val, str) else val.get("extra_real", [])
-            print(f"{fake:<{w}}  →  {real}")
-            for e in extras:
-                print(f"  {'(cdn)':<{w - 2}}       {e}")
-        sys.exit(0)
-
-    if args.list_certs:
-        list_certs(cert_dir)
-        sys.exit(0)
-
     if args.stats:
-        _run_stats(stats_path)
+        _run_stats(stats_path)   # always calls sys.exit()
 
-    if args.setup:
-        setup_certs(aliases, cert_dir)
-        sys.exit(0)
+    # Fix #18: run info-only commands before building AliasMap (they don't need it)
+    _run_info_commands(args, aliases, host, port, cert_dir, cfg)
+
+    alias_map = AliasMap(aliases)
+
+    if not args.no_hosts:
+        root_aliases = {k: v if isinstance(v, str) else v.get("real", "") for k, v in aliases.items()}
+        update_hosts_file(root_aliases)
+
+    stats = Stats()
+    stats.init(alias_map.stats_keys)
+    stats.load(stats_path)
 
     asyncio.run(run_proxy(
         host, port, sidecar_port, alias_map, cfg,

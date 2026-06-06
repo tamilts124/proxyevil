@@ -8,7 +8,7 @@ GET  /                  Live HTML dashboard (auto-refreshes every 5 s)
 GET  /status            Alias for /
 GET  /proxy.pac         PAC file for browser auto-config
 GET  /hosts             Plain-text /etc/hosts block
-GET  /stats.json        Machine-readable stats JSON
+GET  /stats.json        Machine-readable stats JSON (includes top-level totals)
 GET  /config.json       Currently running config (strips _comments)
 GET  /health            JSON health check (for Docker / uptime monitors)
 GET  /reset/<fake>      Reset one alias's stats + redirect to dashboard
@@ -19,6 +19,23 @@ POST /reset             Reset all stats counters
 POST /reset/<fake>      Reset one alias's stats
 POST /alias             Add/update alias  {"fake": "...", "real": "..."}
 DELETE /alias/<fake>    Remove an alias at runtime
+
+Authentication
+--------------
+Mutating endpoints (POST /reload, POST /alias, DELETE /alias, POST /reset,
+POST /stats/save) require the ``X-Proxyevil-Token`` request header to match
+the ``sidecar_token`` value in config.json.  If ``sidecar_token`` is not set
+(or is an empty string) the check is skipped — preserving backwards-compat
+for local dev setups that don't need it.
+
+To enable, add to config.json::
+
+    "sidecar_token": "your-secret-token"
+
+Then pass the header::
+
+    curl -X POST -H "X-Proxyevil-Token: your-secret-token" \\
+         http://127.0.0.1:8081/reload
 """
 
 import json
@@ -33,6 +50,7 @@ from alias_map import AliasMap
 from config    import load_config, save_config
 from stats     import Stats
 from hosts_manager import update_hosts_file
+from logfilter import install_log_filters
 
 if TYPE_CHECKING:
     from addon import DomainAliasAddon
@@ -81,6 +99,12 @@ async function refresh() {{
     const r = await fetch('/stats.json');
     if (!r.ok) return;
     const d = await r.json();
+    if (d.gen === _lastGen) {{
+      document.getElementById('uptime').textContent = fmtUptime(Date.now()-START);
+      document.getElementById('status').textContent = ' • no change';
+      return;
+    }}
+    _lastGen = d.gen;
     document.getElementById('uptime').textContent = fmtUptime(Date.now()-START);
     for (const [alias, st] of Object.entries(d.aliases)) {{
       const row = document.querySelector(`tr[data-alias="${{alias}}"]`);
@@ -100,9 +124,14 @@ async function refresh() {{
   }}
 }}
 setInterval(refresh, 5000);
+let _lastGen = -1;
+const _TOKEN = {token_json};
+function _authHeaders() {{
+  return _TOKEN ? {{'X-Proxyevil-Token': _TOKEN}} : {{}};
+}}
 async function doPost(url, label) {{
   if (label && !confirm(label)) return;
-  const r = await fetch(url, {{method:'POST'}});
+  const r = await fetch(url, {{method:'POST', headers: _authHeaders()}});
   const t = await r.text();
   document.getElementById('status').textContent = ' • ' + t;
   await refresh();
@@ -114,7 +143,7 @@ async function reloadCfg()    {{ await doPost('/reload', null); }}
 
 
 def _build_dashboard(snap, aliases, uptime, uptime_str, since_str,
-                     proxy_host, proxy_port, sidecar_port):
+                     proxy_host, proxy_port, sidecar_port, token=""):
     rows = ""
     for fake, real in sorted(aliases.items()):
         st       = snap.get(fake, {})
@@ -147,7 +176,10 @@ def _build_dashboard(snap, aliases, uptime, uptime_str, since_str,
             f'</tr>'
         )
 
-    js = _DASHBOARD_JS.format(uptime_ms=uptime * 1000)
+    js = _DASHBOARD_JS.format(
+        uptime_ms=uptime * 1000,
+        token_json=json.dumps(token or ""),
+    )
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <title>proxyevil v{__version__}</title>
@@ -198,14 +230,17 @@ class _SidecarHandler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass  # silence default access log
 
+    # Fix #4: use try/finally so _head_only is always cleared even if do_GET raises
     def do_HEAD(self):
         self._head_only = True
-        self.do_GET()
-        self._head_only = False
+        try:
+            self.do_GET()
+        finally:
+            self._head_only = False
 
     def do_GET(self):
         self._head_only = getattr(self, "_head_only", False)
-        p = self.path.split("?")[0]   # strip query string for routing
+        p = self.path.split("?")[0]
         if p in ("/proxy.pac",):
             self._serve_pac()
         elif p in ("/", "/status"):
@@ -221,6 +256,10 @@ class _SidecarHandler(BaseHTTPRequestHandler):
         elif p == "/health":
             self._serve_health()
         elif p.startswith("/reset/"):
+            if not self._check_token():
+                return
+            if not self._check_origin():
+                return
             fake = p[len("/reset/"):]
             self.stats.reset(fake)
             log.info(f"[RESET] stats reset for {fake} (via GET)")
@@ -231,6 +270,10 @@ class _SidecarHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        if not self._check_token():
+            return
+        if not self._check_origin():
+            return
         p = self.path.split("?")[0]
         if p == "/reload":
             self._handle_reload()
@@ -246,17 +289,55 @@ class _SidecarHandler(BaseHTTPRequestHandler):
             self.send_error(405)
 
     def do_DELETE(self):
+        if not self._check_token():
+            return
+        if not self._check_origin():
+            return
         p = self.path.split("?")[0]
         if p.startswith("/alias/"):
             self._handle_remove_alias(p[len("/alias/"):])
         else:
             self.send_error(405)
 
+    # ── auth helpers ──────────────────────────────────────────────────────────
+
+    def _check_token(self) -> bool:
+        expected = self.cfg.get("sidecar_token", "")
+        if not expected:
+            return True
+        provided = self.headers.get("X-Proxyevil-Token", "")
+        if provided == expected:
+            return True
+        self._respond(403, "text/plain", b"forbidden: missing or wrong X-Proxyevil-Token")
+        return False
+
+    def _check_origin(self) -> bool:
+        origin = self.headers.get("Origin", "")
+        if not origin:
+            return True
+        sidecar_port = self.server.server_address[1]
+        allowed = {
+            "null",
+            f"http://127.0.0.1:{sidecar_port}",
+            f"http://localhost:{sidecar_port}",
+        }
+        if origin in allowed:
+            return True
+        self._respond(403, "text/plain", b"forbidden: cross-origin request rejected")
+        return False
+
     # ── GET endpoints ─────────────────────────────────────────────────────────
 
     def _serve_pac(self):
+        aliases = self.cfg.get("aliases", {})
+        # Fix #13: use canonical SPOOF_ALL_DOMAINS key only (config.py normalises
+        # SPOOF_ALL_UNMAPPED_DOMAINS → SPOOF_ALL_DOMAINS on load).
+        spoof_all = self.cfg.get("SPOOF_ALL_DOMAINS", False) or any(
+            isinstance(val, dict) and val.get("SPOOF_ALL_DOMAINS", False)
+            for val in aliases.values()
+        )
         content = _pac_file(
-            self.alias_map.mapping, self.proxy_host, self.proxy_port
+            self.alias_map.mapping, self.proxy_host, self.proxy_port, spoof_all
         ).encode()
         self._respond(200, "application/x-ns-proxy-autoconfig", content)
 
@@ -264,15 +345,24 @@ class _SidecarHandler(BaseHTTPRequestHandler):
         self._respond(200, "text/plain", _hosts_block(self.alias_map.mapping).encode())
 
     def _serve_stats_json(self):
+        # Fix #16: include aggregated totals at top level so consumers don't have to sum
+        snap = self.stats.snapshot()
+        gen  = snap.pop("_gen", 0)   # pull out meta-key before summing alias entries
+        total_requests = sum(v.get("requests", 0) for v in snap.values())
+        total_bytes    = sum(v.get("bytes_rewritten", 0) for v in snap.values())
+        total_errors   = sum(v.get("errors", 0) for v in snap.values())
         payload = json.dumps({
-            "uptime_seconds": int(time.time() - self._start_time),
-            "since":          self._since_str,
-            "aliases":        self.stats.snapshot(),
+            "uptime_seconds":        int(time.time() - self._start_time),
+            "since":                 self._since_str,
+            "gen":                   gen,
+            "total_requests":        total_requests,
+            "total_bytes_rewritten": total_bytes,
+            "total_errors":          total_errors,
+            "aliases":               snap,
         }, indent=2).encode()
         self._respond(200, "application/json", payload)
 
     def _serve_aliases_json(self):
-        """GET /aliases — return current alias map as JSON."""
         payload = json.dumps(self.alias_map.full_mapping, indent=2).encode()
         self._respond(200, "application/json", payload)
 
@@ -281,7 +371,6 @@ class _SidecarHandler(BaseHTTPRequestHandler):
         self._respond(200, "application/json", json.dumps(live, indent=2).encode())
 
     def _serve_health(self):
-        """GET /health — lightweight JSON health check for Docker/uptime monitors."""
         payload = json.dumps({
             "status":         "ok",
             "version":        __version__,
@@ -292,35 +381,41 @@ class _SidecarHandler(BaseHTTPRequestHandler):
 
     def _serve_status(self):
         snap    = self.stats.snapshot()
+        snap.pop("_gen", None)   # Fix #2: strip meta-key before passing to _build_dashboard
         aliases = self.alias_map.mapping
         uptime  = int(time.time() - self._start_time)
         h, rem  = divmod(uptime, 3600)
         m, s    = divmod(rem, 60)
-        uptime_str = f"{h}h {m}m {s}s"
+        uptime_str   = f"{h}h {m}m {s}s"
         sidecar_port = self.server.server_address[1]
+        token        = self.cfg.get("sidecar_token", "")
         html = _build_dashboard(
             snap, aliases, uptime, uptime_str, self._since_str,
-            self.proxy_host, self.proxy_port, sidecar_port,
+            self.proxy_host, self.proxy_port, sidecar_port, token=token,
         )
         self._respond(200, "text/html", html.encode())
 
     # ── POST endpoints ────────────────────────────────────────────────────────
 
     def _handle_reload(self):
-        """POST /reload — re-read config.json and hot-reload aliases + rewrite opts."""
         try:
             new_cfg     = load_config(self.config_path)
             new_aliases = new_cfg.get("aliases", {})
             self.alias_map.reload(new_aliases)
             _atomic_cfg_update(self.cfg, new_cfg)
+            # Fix A: init stats before notify_reload so addon sees fresh counters
+            # (mirrors the order in watcher.py)
+            self.stats.init(self.alias_map.stats_keys)
             addon = getattr(self, "addon", None)
             if addon is not None and hasattr(addon, "notify_reload"):
                 addon.notify_reload()
-            self.stats.init(self.alias_map.stats_keys)
-            
-            # Update hosts file based on the new loaded aliases
-            update_hosts_file(self.alias_map.mapping)
-            
+            root_aliases = {
+                k: v if isinstance(v, str) else v.get("real", "")
+                for k, v in new_aliases.items()
+            }
+            update_hosts_file(root_aliases)
+            # Fix D: refresh log filters so new aliases suppress TLS noise immediately
+            install_log_filters(self.alias_map, verbose=self.cfg.get("verbose", False))
             msg = f"reloaded — {len(new_aliases)} aliases"
             log.info(f"[RELOAD] {msg}")
             self._respond(200, "text/plain", msg.encode())
@@ -333,7 +428,6 @@ class _SidecarHandler(BaseHTTPRequestHandler):
             self._respond(500, "text/plain", str(exc).encode())
 
     def _handle_stats_save(self):
-        """POST /stats/save — persist current stats to disk."""
         try:
             self.stats.dump(self.stats_path)
             self._respond(200, "text/plain", f"stats saved to {self.stats_path}".encode())
@@ -353,18 +447,20 @@ class _SidecarHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _has_save(path: str) -> bool:
-        """Return True if the query string contains save=1."""
         qs = path.split("?", 1)[1] if "?" in path else ""
         return any(p.strip() == "save=1" for p in qs.split("&"))
 
     def _handle_add_alias(self):
         """POST /alias  body: {"fake": "...", "real": "..."}
 
-        Adds or updates an alias at runtime.  Does NOT persist to config.json.
-        Use POST /alias with ?save=1 to also write to disk.
+        Fix #11: cfg_aliases may include enabled:false entries; alias_map.reload()
+        correctly filters them via _load(), so passing the full dict is safe.
         """
         try:
-            length = int(self.headers.get("Content-Length", 0))
+            length = min(int(self.headers.get("Content-Length", 0)), 65536)
+            if length <= 0:
+                self._respond(400, "text/plain", b"Content-Length required")
+                return
             body   = self.rfile.read(length)
             data   = json.loads(body)
             fake   = data.get("fake", "").strip().lower()
@@ -372,16 +468,20 @@ class _SidecarHandler(BaseHTTPRequestHandler):
             if not fake or not real:
                 self._respond(400, "text/plain", b"'fake' and 'real' are required")
                 return
-            # Update live alias map
-            current = dict(self.alias_map.mapping)
-            current[fake] = real
-            self.alias_map.reload(current)
+            cfg_aliases = self.cfg.setdefault("aliases", {})
+            cfg_aliases[fake] = real
+            # reload() filters disabled entries internally via _load()
+            self.alias_map.reload(cfg_aliases)
             self.stats.init([fake])
-            update_hosts_file(self.alias_map.mapping)
-            # Optionally persist
+            root_aliases = {
+                k: v if isinstance(v, str) else v.get("real", "")
+                for k, v in cfg_aliases.items()
+            }
+            update_hosts_file(root_aliases)
+            # Fix K: refresh log filters so the new alias suppresses TLS noise
+            install_log_filters(self.alias_map, verbose=self.cfg.get("verbose", False))
             save = self._has_save(self.path)
             if save and self.config_path:
-                self.cfg.setdefault("aliases", {})[fake] = real
                 save_config(self.cfg, self.config_path)
                 msg = f"alias added: {fake} → {real} (persisted)"
             else:
@@ -397,21 +497,22 @@ class _SidecarHandler(BaseHTTPRequestHandler):
     # ── DELETE endpoints ──────────────────────────────────────────────────────
 
     def _handle_remove_alias(self, fake: str):
-        """DELETE /alias/<fake>
-
-        Removes an alias at runtime.  Add ?save=1 to also remove from config.json.
-        """
         fake = fake.strip().lower()
-        current = dict(self.alias_map.mapping)
-        if fake not in current:
+        cfg_aliases = self.cfg.get("aliases", {})
+        if fake not in self.alias_map.mapping and fake not in cfg_aliases:
             self._respond(404, "text/plain", f"alias '{fake}' not found".encode())
             return
-        del current[fake]
-        self.alias_map.reload(current)
-        update_hosts_file(self.alias_map.mapping)
+        cfg_aliases.pop(fake, None)
+        self.alias_map.reload(cfg_aliases)
+        root_aliases = {
+            k: v if isinstance(v, str) else v.get("real", "")
+            for k, v in cfg_aliases.items()
+        }
+        update_hosts_file(root_aliases)
+        # Fix K: refresh log filters so removed alias no longer suppresses TLS noise
+        install_log_filters(self.alias_map, verbose=self.cfg.get("verbose", False))
         save = self._has_save(self.path)
         if save and self.config_path:
-            self.cfg.get("aliases", {}).pop(fake, None)
             save_config(self.cfg, self.config_path)
             msg = f"alias removed: {fake} (persisted)"
         else:
@@ -447,7 +548,7 @@ def start_sidecar(
     proxy_port:   int,
     sidecar_port: int,
     cfg:          dict,
-    config_path:  str  = "",
+    config_path:  str   = "",
     addon:        object = None,
 ) -> HTTPServer:
     """Start the sidecar HTTP server in a daemon thread and return it."""
@@ -464,7 +565,7 @@ def start_sidecar(
         "_start_time": time.time(),
         "_since_str":  since_str,
     })
-    server = HTTPServer(("127.0.0.1", sidecar_port), handler_cls)
+    server = HTTPServer((proxy_host, sidecar_port), handler_cls)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     log.info(f"[SIDECAR] status   → http://127.0.0.1:{sidecar_port}/")
@@ -489,11 +590,14 @@ def _hosts_block(aliases: dict) -> str:
     return "\n".join(lines)
 
 
-def _pac_file(aliases: dict, host: str, port: int) -> str:
-    conditions = " ||\n        ".join(
+def _pac_file(aliases: dict, host: str, port: int, spoof_all: bool = False) -> str:
+    conds = [
         f'shExpMatch(host, "*.{fake}") || shExpMatch(host, "{fake}")'
         for fake in sorted(aliases.keys())
-    )
+    ]
+    if spoof_all:
+        conds.append('shExpMatch(host, "*.local")')
+    conditions = " ||\n        ".join(conds)
     return f"""// proxyevil PAC — auto-generated
 function FindProxyForURL(url, host) {{
     if (

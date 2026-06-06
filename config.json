@@ -4,26 +4,26 @@
   "sidecar_port": 8081,
   "data_dir": "evil_data",
   "verbose": false,
-
+  "SPOOF_ALL_DOMAINS": false,
+  "SPOOFING_EXCLUDE_LIST": [],
   "aliases": {
-    "x.com.local": {
-      "real": "x.com",
-      "extra_real": ["twimg.com"],
+    "cloud.oppo.com.local": {
+      "real": "cloud.oppo.com",
+      "EXTRA_REAL_DOMAINS_TO_SPOOF": [],
+      "SPOOF_ALL_DOMAINS": true,
+      "SPOOFING_EXCLUDE_LIST": [],
       "enabled": true
     }
   },
-
   "cert_dir": "certs",
-
   "rewrite": {
-    "html":    true,
-    "js":      true,
-    "css":     true,
-    "json":    true,
+    "html": true,
+    "js": true,
+    "css": true,
+    "json": true,
     "headers": true,
     "cookies": true
   },
-
   "strip_headers": [
     "Content-Security-Policy",
     "X-Frame-Options",
@@ -36,16 +36,19 @@
     "Cross-Origin-Embedder-Policy",
     "Cross-Origin-Resource-Policy"
   ],
-
   "access_log": false,
-
   "_comments": {
     "access_log": "Set to true to write data_dir/access.log (TSV: timestamp method fake path status size)",
     "max_body_bytes": "Override the 10MB body-rewrite size limit, e.g. 20971520 for 20MB",
     "alias_extended_example": {
       "myfb.local": {
         "real": "www.facebook.com",
-        "extra_real": ["fbcdn.net", "fbsbx.com"],
+        "EXTRA_REAL_DOMAINS_TO_SPOOF": [
+          "fbcdn.net",
+          "fbsbx.com"
+        ],
+        "SPOOF_ALL_DOMAINS": false,
+        "SPOOFING_EXCLUDE_LIST": ["analytics.facebook.com"],
         "enabled": true
       }
     }
