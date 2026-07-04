@@ -37,7 +37,7 @@ todo / in-progress / done / tested / blocked
 - [x] alias_map.py: LRU-cache hit/miss counters exposed via /stats.json — status: tested
   - impl: `AliasMap.cache_stats()` (hits/misses/hit_rate/cache sizes) surfaced as `alias_cache` in sidecar `/stats.json`. 4 tests.
 
-## Current test count: 142 passing (`py -m pytest tests/`)
+## Current test count: 143 passing (`py -m pytest tests/`)
 
 ## Round 3 (proactive extensions, in progress)
 - [x] certs.py: automated certificate renewal (check mkcert CA/leaf expiry, regenerate before expiry) — status: tested
@@ -54,5 +54,6 @@ todo / in-progress / done / tested / blocked
 ## Round 4 (proactive, todo)
 - [x] sidecar.py: rate-limit /stats.json and /logs.json endpoints — status: tested
   - impl: `_RateLimiter` (thread-safe sliding window, per-server instance via `start_sidecar(rate_limit_max=30, rate_limit_window_s=5.0)`), `_check_rate_limit()` returns 429+Retry-After on breach. Per-server (not global) so multiple sidecar instances don't share a bucket. 3 new tests (21 total in test_sidecar.py).
-- [ ] alias_map.py: hot-reload safety — verify reload() is atomic under concurrent request handling (thread safety audit) — status: todo
+- [x] alias_map.py: hot-reload safety audit — status: tested
+  - audit: reload()->_load() already runs fully under self._lock (RLock); rewrite_real_to_fake/fake_to_real grab pattern+dict snapshot under lock then release before the (possibly large) regex substitution, so a concurrent reload can't mutate a dict mid-iteration. Design was already correct; added a dedicated stress test (8 rewrite threads + 1 concurrent-reload thread, 200 iterations each) to lock in the guarantee. 1 new test (22 total in test_alias_map.py), no code changes needed.
 - [ ] config.py: schema versioning / migration path for older config.json files — status: todo

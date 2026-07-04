@@ -152,3 +152,45 @@ def test_concurrent_dynamic_registration():
         t.join()
     assert not errors
     assert len(m.mapping) == 50
+
+
+# ── Extreme: reload() racing against concurrent rewrite calls ────────────
+def test_concurrent_reload_during_rewrite_no_crash():
+    """Hammer reload() from one thread while many threads call
+    rewrite_real_to_fake/rewrite_fake_to_real concurrently. Must never raise
+    (no KeyError/RuntimeError from torn state) and every result must be a str.
+    """
+    am = AliasMap({"a.local": "a.com"})
+    errors = []
+    stop = threading.Event()
+
+    def reloader():
+        n = 0
+        while not stop.is_set():
+            n += 1
+            aliases = {f"host{n % 5}.local": f"host{n % 5}.com"} if n % 2 else {"a.local": "a.com"}
+            try:
+                am.reload(aliases)
+            except Exception as exc:
+                errors.append(exc)
+
+    def worker():
+        for _ in range(200):
+            try:
+                r1 = am.rewrite_real_to_fake("visit https://a.com/page and host2.com too")
+                r2 = am.rewrite_fake_to_real("visit https://a.local/page and host2.local too")
+                assert isinstance(r1, str) and isinstance(r2, str)
+            except Exception as exc:
+                errors.append(exc)
+
+    rt = threading.Thread(target=reloader)
+    workers = [threading.Thread(target=worker) for _ in range(8)]
+    rt.start()
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+    stop.set()
+    rt.join(timeout=2)
+
+    assert errors == []
