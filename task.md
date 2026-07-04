@@ -16,9 +16,10 @@ todo / in-progress / done / tested / blocked
 - [x] test_certs.py — mkcert missing/failure, shell-injection-safety (arg list not shell=True), directory traversal — status: tested (7 tests)
   - bug found & fixed: certs.py built filesystem paths directly from alias domain names with no validation — a domain like `../../evil` in config.json could escape cert_dir. Added `_is_safe_domain()` hostname validator in certs.py; unsafe names are now skipped with a warning in both setup_certs and collect_certs.
 - [x] test_hosts_manager.py — privilege checks, atomic write, no-op idempotency, unreadable file — status: tested (6 tests)
-- [ ] test_sidecar.py — dashboard/PAC/stats endpoints, token auth, origin validation — status: in-progress
+- [x] test_sidecar.py — dashboard/PAC/stats endpoints, token auth, origin validation — status: tested (13 tests, real HTTPServer on ephemeral port)
+  - note: module-scoped server fixtures used (one per token config) — many function-scoped HTTPServer/thread instances in one pytest run destabilized the test host process.
 - [ ] test_watcher.py — config hot-reload behavior — status: todo
 - [ ] Extreme: large HTML body (multi-MB) rewrite perf/memory test — status: todo
 - [x] addon.py line count re-check (post-fix, ~565 lines) — no split needed — status: done
 
-## Current test count: 65 passing (`py -m pytest tests/`)
+## Current test count: 78 passing (`py -m pytest tests/`)

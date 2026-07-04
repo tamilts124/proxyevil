@@ -1,0 +1,19 @@
+{
+  "saved_at": "2026-07-04 18:29:39",
+  "aliases": {
+    "mybook.local": {
+      "requests": 0,
+      "bytes_rewritten": 0,
+      "rewrites": 0,
+      "errors": 0,
+      "last_seen": "\u2014",
+      "rewrite_by_type": {
+        "html": 0,
+        "js": 0,
+        "css": 0,
+        "json": 0,
+        "other": 0
+      }
+    }
+  }
+}
