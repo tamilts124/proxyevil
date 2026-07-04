@@ -507,7 +507,7 @@ class DomainAliasAddon:
         if not spoof_enabled and not has_sri:
             if did_decompress or not enc or enc == "identity":
                 dec_lower = decompressed.lower()
-                if not any(n in dec_lower for n in self.aliases._real_needles):
+                if not self.aliases.contains_real_needle(dec_lower):
                     return 0
 
         charset = "utf-8"

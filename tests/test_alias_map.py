@@ -82,6 +82,33 @@ def test_circular_parent_chain_bounded():
     assert root == "a.local"  # terminates instead of looping forever
 
 
+# ── Combined needle pre-check (perf: single-pass pattern) ─────────────────
+def test_contains_real_needle_true_when_present(am):
+    assert am.contains_real_needle(b"visit https://www.facebook.com/x now")
+
+
+def test_contains_real_needle_false_when_absent(am):
+    assert not am.contains_real_needle(b"nothing interesting here")
+
+
+def test_contains_real_needle_false_when_no_aliases():
+    m = AliasMap({})
+    assert not m.contains_real_needle(b"www.facebook.com")
+
+
+def test_contains_real_needle_matches_extra_real_domain(am):
+    # ggpht.com is registered as an extra_real domain under mygoogle.local
+    assert am.contains_real_needle(b"cdn served from ggpht.com today")
+
+
+def test_combined_pattern_scales_with_many_aliases():
+    aliases = {f"f{i}.local": f"real{i}.example.com" for i in range(500)}
+    m = AliasMap(aliases)
+    haystack = (b"nothing here " * 1000) + b"real499.example.com"
+    assert m.contains_real_needle(haystack.lower())
+    assert not m.contains_real_needle(b"nothing here " * 1000)
+
+
 # ── Extreme / concurrency ────────────────────────────────────────────────
 def test_concurrent_dynamic_registration():
     m = AliasMap({})

@@ -22,6 +22,21 @@ log = logging.getLogger("proxyevil.alias_map")
 
 _MAX_PARENT_DEPTH = 50   # Fix #6: guard against circular parent chains
 
+
+def _combined_byte_pattern(needles: list) -> Optional[re.Pattern]:
+    """Compile a single alternation regex over pre-lowercased byte needles.
+
+    Used for the "does this body contain any real/fake domain at all"
+    pre-check. A single combined pattern lets the regex engine scan the
+    haystack once regardless of alias count, instead of the naive
+    O(len(needles) * len(haystack)) cost of testing each needle with `in`.
+    Falls back to None (caller treats as "no needles, nothing to match")
+    when the alias set is empty.
+    """
+    if not needles:
+        return None
+    return re.compile(b"|".join(re.escape(n) for n in needles))
+
 # Fix #21: single module-level _pat() used everywhere (was copy-pasted in two methods)
 def _pat(domains: list) -> Optional[re.Pattern]:
     """Compile a domain-matching regex from a list of domain strings."""
@@ -212,6 +227,7 @@ class AliasMap:
             except (UnicodeError, UnicodeDecodeError):
                 needles.append(r.encode("utf-8"))
         self._real_needles: list[bytes] = needles
+        self._real_needle_pattern: Optional[re.Pattern] = _combined_byte_pattern(needles)
 
         fake_needles = []
         for f in self._fake_to_real:
@@ -220,6 +236,7 @@ class AliasMap:
             except (UnicodeError, UnicodeDecodeError):
                 fake_needles.append(f.encode("utf-8"))
         self._fake_needles: list[bytes] = fake_needles
+        self._fake_needle_pattern: Optional[re.Pattern] = _combined_byte_pattern(fake_needles)
 
         self._real_cache: OrderedDict[str, Optional[str]] = OrderedDict()
         self._fake_cache: OrderedDict[str, Optional[str]] = OrderedDict()
@@ -422,6 +439,14 @@ class AliasMap:
     def is_spoof_all_enabled(self, fake: str) -> bool:
         with self._lock:
             return fake.lower().rstrip(".") in self._spoof_all_enabled
+
+    def contains_real_needle(self, haystack_lower: bytes) -> bool:
+        """Fast pre-check: does *haystack_lower* (already lowercased bytes)
+        contain any real-side domain? Uses the combined single-pass pattern
+        built in _rebuild_patterns(); returns False (nothing to do) when
+        there are no aliases configured."""
+        pat = self._real_needle_pattern
+        return pat is not None and pat.search(haystack_lower) is not None
 
     def get_exclusions_for(self, context_fake: Optional[str] = None) -> list:
         if not context_fake:

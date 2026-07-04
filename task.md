@@ -22,7 +22,13 @@ todo / in-progress / done / tested / blocked
 - [x] Extreme: large HTML body (multi-MB) rewrite perf/memory test — status: tested (tests/test_perf.py, 2 tests: 5MB body rewritten <5s/<6x mem, 8MB body over-limit skipped <1s)
 - [x] addon.py line count re-check (post-fix, ~565 lines) — no split needed — status: done
 
-## Current test count: 116 passing (`py -m pytest tests/`)
+## Current test count: 121 passing (`py -m pytest tests/`)
+## All proactive extensions from prior round complete. New round queued below.
+
+## Proactive extension ideas — round 2 (todo, not yet started)
+- [ ] certs.py: automated certificate renewal (check mkcert CA/leaf expiry, regenerate before expiry) — status: todo
+- [ ] sidecar dashboard: surface /logs.json ring buffer in the HTML dashboard view (currently JSON-only) — status: todo
+- [ ] alias_map.py: LRU-cache eviction metrics (cache hit/miss counters) exposed via /stats.json — status: todo
 ## All planned test modules complete (alias_map, codec, config, stats, addon, certs, hosts_manager, sidecar, watcher).
 ## Next: proactive extensions — see below.
 
@@ -32,4 +38,5 @@ todo / in-progress / done / tested / blocked
   - impl: Stats.log_request()/recent() thread-safe deque(maxlen=200) in stats.py; wired from addon.py response handler; GET /logs.json?limit=N in sidecar.py (7 new tests across stats+sidecar)
 - [x] Sidecar: domain blacklist feature (block specific hosts from being proxied) — status: tested
   - impl: config.py `blacklist` key (list[str], validated), addon.py `_host_matches_blacklist()` (exact + "*.domain" wildcard, case/trailing-dot insensitive) checked at top of `request()` before alias resolution → 403 response, stats.error() recorded. 12 new tests (addon + config).
-- [ ] alias_map.py: cache the compiled real/fake regex needle scan with a single combined Aho-Corasick-style search for large alias counts — status: todo
+- [x] alias_map.py: cache the compiled real/fake regex needle scan with a single combined Aho-Corasick-style search for large alias counts — status: tested
+  - impl: `_combined_byte_pattern()` builds one alternation regex over all real/fake needles at rebuild time (`_real_needle_pattern`/`_fake_needle_pattern`); new `AliasMap.contains_real_needle()` replaces addon.py's O(N_aliases × body_len) `any(n in body for n in needles)` loop with a single-pass regex search. 5 new tests incl. 500-alias scale check.
