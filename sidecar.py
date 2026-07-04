@@ -81,6 +81,14 @@ button.danger:hover{background:#522;color:#fcc}
 #status{font-size:.8em;color:#888}
 .type-bar{display:flex;gap:.3em;font-size:.75em}
 .type-pill{background:#2a2a2a;border:1px solid #444;padding:.1em .45em;border-radius:10px}
+#logbox{margin-top:1.2em}
+#logbox h3{margin:.2em 0;font-size:.9em;color:#999;font-weight:normal;text-transform:uppercase;letter-spacing:.05em}
+#logtable{font-size:.8em}
+#logtable td{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:22em}
+.st-2xx{color:#7c7}
+.st-3xx{color:#7af}
+.st-4xx{color:#e95}
+.st-5xx{color:#e57}
 """
 
 _DASHBOARD_JS = """
@@ -127,6 +135,29 @@ async function refresh() {{
 }}
 setInterval(refresh, 5000);
 let _lastGen = -1;
+function stClass(s) {{ return 'st-'+Math.floor(s/100)+'xx'; }}
+async function refreshLogs() {{
+  try {{
+    const r = await fetch('/logs.json?limit=20');
+    if (!r.ok) return;
+    const rows = await r.json();
+    const tbody = document.getElementById('logtbody');
+    tbody.innerHTML = '';
+    for (const e of rows) {{
+      const tr = document.createElement('tr');
+      const cells = [e.ts, e.method, e.fake, e.path, String(e.status), fmtKB(e.size||0), e.content_type||''];
+      cells.forEach((v, i) => {{
+        const td = document.createElement('td');
+        td.textContent = v;
+        if (i === 4) td.className = stClass(e.status);
+        tr.appendChild(td);
+      }});
+      tbody.appendChild(tr);
+    }}
+  }} catch(e) {{ /* dashboard still usable without log panel */ }}
+}}
+setInterval(refreshLogs, 5000);
+refreshLogs();
 const _TOKEN = {token_json};
 function _authHeaders() {{
   return _TOKEN ? {{'X-Proxyevil-Token': _TOKEN}} : {{}};
@@ -193,6 +224,7 @@ def _build_dashboard(snap, aliases, uptime, uptime_str, since_str,
   <a href="/hosts">hosts</a>
   <a href="/aliases">aliases</a>
   <a href="/stats.json">stats.json</a>
+  <a href="/logs.json">logs.json</a>
   <a href="/config.json">config.json</a>
   <a href="/health">health</a>
   <span>Uptime: <span id="uptime">{uptime_str}</span></span>
@@ -208,6 +240,13 @@ def _build_dashboard(snap, aliases, uptime, uptime_str, since_str,
   <button onclick="reloadCfg()">&#x21BA; Reload config</button>
   <button class="danger" onclick="resetAll()">&#x2297; Reset all stats</button>
   <small style="color:#555">or: <code>curl -X POST http://127.0.0.1:{sidecar_port}/reload</code></small>
+</div>
+<div id="logbox">
+  <h3>Recent requests</h3>
+  <table id="logtable">
+    <tr><th>Time</th><th>Method</th><th>Alias</th><th>Path</th><th>Status</th><th>Size</th><th>Type</th></tr>
+    <tbody id="logtbody"></tbody>
+  </table>
 </div>
 <script>{js}</script>
 </body></html>"""

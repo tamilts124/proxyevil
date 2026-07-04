@@ -22,12 +22,13 @@ todo / in-progress / done / tested / blocked
 - [x] Extreme: large HTML body (multi-MB) rewrite perf/memory test — status: tested (tests/test_perf.py, 2 tests: 5MB body rewritten <5s/<6x mem, 8MB body over-limit skipped <1s)
 - [x] addon.py line count re-check (post-fix, ~565 lines) — no split needed — status: done
 
-## Current test count: 121 passing (`py -m pytest tests/`)
+## Current test count: 122 passing (`py -m pytest tests/`)
 ## All proactive extensions from prior round complete. New round queued below.
 
 ## Proactive extension ideas — round 2 (todo, not yet started)
 - [ ] certs.py: automated certificate renewal (check mkcert CA/leaf expiry, regenerate before expiry) — status: todo
-- [ ] sidecar dashboard: surface /logs.json ring buffer in the HTML dashboard view (currently JSON-only) — status: todo
+- [x] sidecar dashboard: surface /logs.json ring buffer in the HTML dashboard view (currently JSON-only) — status: tested
+  - impl: dashboard now has a "Recent requests" panel (#logbox/#logtable) polling GET /logs.json?limit=20 every 5s, status-code color classes (2xx/3xx/4xx/5xx), textContent-only rendering (no HTML injection risk from logged paths/UAs). 1 new test.
 - [ ] alias_map.py: LRU-cache eviction metrics (cache hit/miss counters) exposed via /stats.json — status: todo
 ## All planned test modules complete (alias_map, codec, config, stats, addon, certs, hosts_manager, sidecar, watcher).
 ## Next: proactive extensions — see below.

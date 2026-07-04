@@ -93,6 +93,14 @@ def test_dashboard_root(server):
     assert status == 200 and b"<html" in body.lower()
 
 
+def test_dashboard_includes_logs_panel(server):
+    _, _, _, port = server
+    status, body = _get(port, "/")
+    assert status == 200
+    assert b'id="logbox"' in body and b'id="logtbody"' in body
+    assert b"/logs.json" in body  # refreshLogs() fetch target present
+
+
 def test_reset_all_no_token_required_when_unset(server):
     _, _, st, port = server
     st.hit("mybook.local", 5)
