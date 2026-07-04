@@ -185,3 +185,59 @@ def test_same_origin_post_allowed(server):
     _, _, _, port = server
     status, _ = _post(port, "/reset", b"", headers={"Origin": f"http://127.0.0.1:{port}"})
     assert status == 200
+
+
+# ── Rate limiting: /stats.json and /logs.json ───────────────────────────────
+def test_stats_json_rate_limited_after_threshold():
+    cfg = {"aliases": {"a.local": "a.com"}}
+    am = AliasMap(cfg["aliases"])
+    st = Stats()
+    st.init(am.stats_keys)
+    srv = sidecar.start_sidecar(am, st, "evil_data_test/stats.json", "127.0.0.1", 8080, 0,
+                                 cfg, config_path="", rate_limit_max=3, rate_limit_window_s=5.0)
+    port = srv.server_address[1]
+    try:
+        codes = [_get(port, "/stats.json")[0] for _ in range(5)]
+        assert codes[:3] == [200, 200, 200]
+        assert 429 in codes[3:]
+    finally:
+        srv.shutdown()
+
+
+def test_logs_json_rate_limit_independent_per_server():
+    """Two separate sidecar instances must not share a rate-limit bucket."""
+    cfg = {"aliases": {}}
+    am1, am2 = AliasMap({}), AliasMap({})
+    st1, st2 = Stats(), Stats()
+    st1.init([]); st2.init([])
+    srv1 = sidecar.start_sidecar(am1, st1, "evil_data_test/stats.json", "127.0.0.1", 8080, 0,
+                                  cfg, config_path="", rate_limit_max=2, rate_limit_window_s=5.0)
+    srv2 = sidecar.start_sidecar(am2, st2, "evil_data_test/stats.json", "127.0.0.1", 8080, 0,
+                                  cfg, config_path="", rate_limit_max=2, rate_limit_window_s=5.0)
+    try:
+        p1, p2 = srv1.server_address[1], srv2.server_address[1]
+        for _ in range(2):
+            assert _get(p1, "/logs.json")[0] == 200
+        assert _get(p1, "/logs.json")[0] == 429
+        # srv2 has its own independent budget, unaffected by srv1's usage
+        assert _get(p2, "/logs.json")[0] == 200
+    finally:
+        srv1.shutdown()
+        srv2.shutdown()
+
+
+def test_rate_limit_does_not_apply_to_dashboard():
+    cfg = {"aliases": {}}
+    am = AliasMap({})
+    st = Stats(); st.init([])
+    srv = sidecar.start_sidecar(am, st, "evil_data_test/stats.json", "127.0.0.1", 8080, 0,
+                                 cfg, config_path="", rate_limit_max=1, rate_limit_window_s=5.0)
+    port = srv.server_address[1]
+    try:
+        # exhaust the /stats.json budget
+        assert _get(port, "/stats.json")[0] == 200
+        assert _get(port, "/stats.json")[0] == 429
+        # dashboard route is unrelated to the json rate limiter
+        assert _get(port, "/")[0] == 200
+    finally:
+        srv.shutdown()

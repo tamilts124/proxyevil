@@ -39,6 +39,7 @@ Then pass the header::
          http://127.0.0.1:8081/reload
 """
 
+import collections
 import json
 import logging
 import time
@@ -60,6 +61,37 @@ if TYPE_CHECKING:
 log = logging.getLogger("proxyevil.sidecar")
 
 from _version import __version__
+
+
+class _RateLimiter:
+    """Thread-safe sliding-window rate limiter, keyed by client IP.
+
+    Guards cheap-to-hammer but non-trivial-cost GET endpoints (/stats.json,
+    /logs.json) from being polled fast enough to burn CPU/GC churn on a
+    local dev box (e.g. a runaway script or misbehaving dashboard tab).
+    """
+
+    def __init__(self, max_requests: int = 30, window_s: float = 5.0):
+        self.max_requests = max_requests
+        self.window_s = window_s
+        self._hits = collections.defaultdict(collections.deque)
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        now = time.time()
+        with self._lock:
+            dq = self._hits[key]
+            while dq and now - dq[0] > self.window_s:
+                dq.popleft()
+            if len(dq) >= self.max_requests:
+                return False
+            dq.append(now)
+            return True
+
+    def reset(self):
+        """Test helper: clear all tracked hits."""
+        with self._lock:
+            self._hits.clear()
 
 
 # ── HTML dashboard ─────────────────────────────────────────────────────────────
@@ -291,9 +323,11 @@ class _SidecarHandler(BaseHTTPRequestHandler):
         elif p == "/aliases":
             self._serve_aliases_json()
         elif p == "/stats.json":
-            self._serve_stats_json()
+            if self._check_rate_limit():
+                self._serve_stats_json()
         elif p == "/logs.json":
-            self._serve_logs_json()
+            if self._check_rate_limit():
+                self._serve_logs_json()
         elif p == "/config.json":
             self._serve_config_json()
         elif p == "/health":
@@ -352,6 +386,21 @@ class _SidecarHandler(BaseHTTPRequestHandler):
         if provided == expected:
             return True
         self._respond(403, "text/plain", b"forbidden: missing or wrong X-Proxyevil-Token")
+        return False
+
+    def _check_rate_limit(self) -> bool:
+        limiter = self.rate_limiter
+        client_ip = self.client_address[0]
+        if limiter.allow(client_ip):
+            return True
+        self.send_response(429)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Retry-After", str(int(limiter.window_s)))
+        body = b"rate limit exceeded, slow down"
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if not getattr(self, "_head_only", False):
+            self.wfile.write(body)
         return False
 
     def _check_origin(self) -> bool:
@@ -604,6 +653,8 @@ def start_sidecar(
     cfg:          dict,
     config_path:  str   = "",
     addon:        object = None,
+    rate_limit_max: int   = 30,
+    rate_limit_window_s: float = 5.0,
 ) -> HTTPServer:
     """Start the sidecar HTTP server in a daemon thread and return it."""
     since_str   = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -618,6 +669,7 @@ def start_sidecar(
         "addon":       addon,
         "_start_time": time.time(),
         "_since_str":  since_str,
+        "rate_limiter": _RateLimiter(max_requests=rate_limit_max, window_s=rate_limit_window_s),
     })
     server = HTTPServer((proxy_host, sidecar_port), handler_cls)
     t = threading.Thread(target=server.serve_forever, daemon=True)

@@ -37,7 +37,7 @@ todo / in-progress / done / tested / blocked
 - [x] alias_map.py: LRU-cache hit/miss counters exposed via /stats.json — status: tested
   - impl: `AliasMap.cache_stats()` (hits/misses/hit_rate/cache sizes) surfaced as `alias_cache` in sidecar `/stats.json`. 4 tests.
 
-## Current test count: 139 passing (`py -m pytest tests/`)
+## Current test count: 142 passing (`py -m pytest tests/`)
 
 ## Round 3 (proactive extensions, in progress)
 - [x] certs.py: automated certificate renewal (check mkcert CA/leaf expiry, regenerate before expiry) — status: tested
@@ -52,6 +52,7 @@ todo / in-progress / done / tested / blocked
 ## Round 3: complete — all items tested. See Round 4 below for next proactive batch.
 
 ## Round 4 (proactive, todo)
-- [ ] sidecar.py: auth/rate-limit for /logs.json and /stats.json endpoints (currently token-gated only, no rate limit) — status: todo
+- [x] sidecar.py: rate-limit /stats.json and /logs.json endpoints — status: tested
+  - impl: `_RateLimiter` (thread-safe sliding window, per-server instance via `start_sidecar(rate_limit_max=30, rate_limit_window_s=5.0)`), `_check_rate_limit()` returns 429+Retry-After on breach. Per-server (not global) so multiple sidecar instances don't share a bucket. 3 new tests (21 total in test_sidecar.py).
 - [ ] alias_map.py: hot-reload safety — verify reload() is atomic under concurrent request handling (thread safety audit) — status: todo
 - [ ] config.py: schema versioning / migration path for older config.json files — status: todo
