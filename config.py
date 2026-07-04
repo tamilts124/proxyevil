@@ -64,6 +64,55 @@ DEFAULTS: dict = {
 }
 
 
+def _migrate_v0_to_v1(cfg: dict) -> dict:
+    """Legacy (unversioned) configs → v1: just stamp the version. All v0
+    field renames (SPOOF_ALL_UNMAPPED_DOMAINS, extra_real, etc.) are already
+    handled generically as back-compat aliases in load_config(), so there is
+    nothing else to transform here — this exists as the template for future
+    migrations and to make the version bump explicit/logged.
+    """
+    cfg["schema_version"] = 1
+    return cfg
+
+
+# Registry of migration functions keyed by the *source* version they migrate
+# FROM. Add a new entry here (and bump SCHEMA_VERSION) whenever a breaking
+# config change ships, e.g. `2: _migrate_v1_to_v2`.
+_MIGRATIONS = {
+    0: _migrate_v0_to_v1,
+}
+
+
+def _migrate_config(cfg: dict) -> dict:
+    """Apply migrations in sequence until cfg reaches SCHEMA_VERSION.
+
+    Configs with no 'schema_version' key are treated as version 0 (pre-dates
+    versioning). If no migration is registered for the current version, the
+    config is left as-is with a warning rather than crashing — the newer
+    fields it's missing will just fall back to DEFAULTS.
+    """
+    ver = cfg.get("schema_version", 0)
+    if not isinstance(ver, int):
+        ver = 0
+    seen = set()
+    while ver < SCHEMA_VERSION:
+        if ver in seen:  # pragma: no cover - defensive, prevents infinite loop
+            log.warning(f"[CFG] migration cycle detected at schema_version={ver} — aborting migration")
+            break
+        seen.add(ver)
+        migrate_fn = _MIGRATIONS.get(ver)
+        if migrate_fn is None:
+            log.warning(
+                f"[CFG] no migration path from schema_version={ver} to {SCHEMA_VERSION} — leaving config as-is"
+            )
+            break
+        log.info(f"[CFG] migrating config schema_version {ver} → {ver + 1}")
+        cfg = migrate_fn(cfg)
+        new_ver = cfg.get("schema_version", ver + 1)
+        ver = new_ver if isinstance(new_ver, int) else ver + 1
+    return cfg
+
+
 def load_config(path: Optional[str] = None) -> dict:
     """Load and validate config.json.  Merges defaults so callers always get
     a fully-populated dict even for missing/partial files."""
@@ -84,6 +133,7 @@ def load_config(path: Optional[str] = None) -> dict:
         sys.exit(1)
 
     log.info(f"[CFG] loaded → {p}")
+    cfg = _migrate_config(cfg)
     _warn_schema_version(cfg)
 
     # Merge top-level defaults so every key is present
