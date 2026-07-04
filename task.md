@@ -19,15 +19,14 @@ todo / in-progress / done / tested / blocked
 - [x] test_sidecar.py — dashboard/PAC/stats endpoints, token auth, origin validation — status: tested (13 tests, real HTTPServer on ephemeral port)
   - note: module-scoped server fixtures used (one per token config) — many function-scoped HTTPServer/thread instances in one pytest run destabilized the test host process.
 - [x] test_watcher.py — retry logic, watchfiles-missing fallback, hot-reload wiring, invalid-config resilience — status: tested (6 tests)
-- [ ] Extreme: large HTML body (multi-MB) rewrite perf/memory test — status: todo
+- [x] Extreme: large HTML body (multi-MB) rewrite perf/memory test — status: tested (tests/test_perf.py, 2 tests: 5MB body rewritten <5s/<6x mem, 8MB body over-limit skipped <1s)
 - [x] addon.py line count re-check (post-fix, ~565 lines) — no split needed — status: done
 
-## Current test count: 84 passing (`py -m pytest tests/`)
+## Current test count: 86 passing (`py -m pytest tests/`)
 ## All planned test modules complete (alias_map, codec, config, stats, addon, certs, hosts_manager, sidecar, watcher).
 ## Next: proactive extensions — see below.
 
 ## Proactive extension ideas (todo, not yet started)
-- [ ] Extreme: large HTML body (multi-MB) rewrite perf/memory test — status: todo
 - [ ] logfilter.py test coverage (currently untested module) — status: todo
 - [ ] Sidecar: request logs viewer endpoint (recent N requests ring buffer) — status: todo
 - [ ] Sidecar: domain blacklist feature (block specific hosts from being proxied) — status: todo
