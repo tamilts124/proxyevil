@@ -10,6 +10,7 @@ import time
 from typing import Optional
 
 from alias_map import AliasMap
+from certs     import check_and_renew
 from config    import load_config
 from hosts_manager import update_hosts_file
 from logfilter import install_log_filters
@@ -48,8 +49,16 @@ def start_config_watcher(
     stats:       Optional[Stats] = None,
     addon:       object          = None,
     verbose:     bool            = False,
+    cert_dir:    Optional[str]   = None,
+    renew_interval_s: float      = 86400.0,
+    renew_days_threshold: int    = 14,
 ) -> Optional[threading.Thread]:
-    """Watch *config_path* and hot-reload aliases + rewrite config on change."""
+    """Watch *config_path* and hot-reload aliases + rewrite config on change.
+
+    If *cert_dir* is given, also starts a background thread that periodically
+    (every *renew_interval_s* seconds) checks alias certs for upcoming expiry
+    and renews them via mkcert (see certs.check_and_renew).
+    """
     try:
         from watchfiles import watch  # type: ignore
     except ImportError:
@@ -97,4 +106,24 @@ def start_config_watcher(
     t = threading.Thread(target=_watch, daemon=True, name="config-watcher")
     t.start()
     log.info(f"[WATCH] watching {config_path}")
+
+    if cert_dir:
+        def _renew_loop():
+            while True:
+                time.sleep(renew_interval_s)
+                try:
+                    aliases = live_cfg.get("aliases", {})
+                    root_aliases = {
+                        k: v if isinstance(v, str) else v.get("real", "")
+                        for k, v in aliases.items()
+                    }
+                    renewed = check_and_renew(root_aliases, cert_dir, renew_days_threshold)
+                    if renewed:
+                        log.info(f"[WATCH] auto-renewed certs: {', '.join(renewed)}")
+                except Exception as exc:
+                    log.warning(f"[WATCH] cert renewal check failed: {exc}")
+
+        rt = threading.Thread(target=_renew_loop, daemon=True, name="cert-renewer")
+        rt.start()
+
     return t

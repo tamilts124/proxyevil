@@ -94,3 +94,47 @@ def test_hot_reload_keeps_previous_config_on_invalid_edit(tmp_path, monkeypatch)
     t.join(timeout=3)
     # Previous mapping must be untouched — no crash, no partial reload.
     assert am.real_for("good.local") == "good.com"
+
+
+# ── Cert auto-renewal thread wiring ─────────────────────────────────────
+def test_renew_loop_calls_check_and_renew(tmp_path, monkeypatch):
+    import watcher
+
+    calls = []
+    monkeypatch.setattr(watcher, "check_and_renew", lambda aliases, cert_dir, days: calls.append((aliases, cert_dir, days)) or [])
+
+    # Make the watch() generator never yield so only the renew thread matters.
+    def fake_watch(path, debounce=500):
+        return iter(())
+
+    monkeypatch.setitem(__import__("sys").modules, "watchfiles", type("M", (), {"watch": staticmethod(fake_watch)})())
+
+    live_cfg = {"aliases": {"a.local": "a.com"}}
+    t = watcher.start_config_watcher(
+        str(tmp_path / "config.json"), alias_map=type("AM", (), {"reload": lambda self, a: None, "stats_keys": []})(),
+        live_cfg=live_cfg, cert_dir=str(tmp_path), renew_interval_s=0.05, renew_days_threshold=14,
+    )
+    import time as _time
+    _time.sleep(0.2)
+    assert calls, "check_and_renew should have been invoked by the periodic thread"
+    assert calls[0][1] == str(tmp_path)
+    assert calls[0][2] == 14
+
+
+def test_no_renew_thread_without_cert_dir(tmp_path, monkeypatch):
+    import watcher
+
+    def fake_watch(path, debounce=500):
+        return iter(())
+
+    monkeypatch.setitem(__import__("sys").modules, "watchfiles", type("M", (), {"watch": staticmethod(fake_watch)})())
+    before = len(__import__("threading").enumerate())
+    watcher.start_config_watcher(
+        str(tmp_path / "config.json"), alias_map=type("AM", (), {"reload": lambda self, a: None, "stats_keys": []})(),
+        live_cfg={"aliases": {}},
+    )
+    import time as _time
+    _time.sleep(0.05)
+    after = len(__import__("threading").enumerate())
+    # only the config-watcher thread should have been added, not a cert-renewer
+    assert after - before <= 1
