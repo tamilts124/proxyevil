@@ -73,6 +73,38 @@ def test_load_corrupt_file_noop(tmp_path):
     assert s.snapshot() == {"_gen": 0}
 
 
+# ── Request-log ring buffer ──────────────────────────────────────────────
+def test_log_request_recorded_newest_first():
+    s = Stats()
+    s.log_request("a.local", "GET", "/1", 200, 10, "text/html")
+    s.log_request("a.local", "GET", "/2", 200, 20, "text/html")
+    recent = s.recent()
+    assert len(recent) == 2
+    assert recent[0]["path"] == "/2"   # newest first
+    assert recent[1]["path"] == "/1"
+
+
+def test_recent_respects_limit():
+    s = Stats()
+    for i in range(10):
+        s.log_request("a.local", "GET", f"/{i}", 200, 1, "text/html")
+    assert len(s.recent(limit=3)) == 3
+
+
+def test_recent_ring_buffer_bounded():
+    s = Stats()
+    for i in range(250):  # over _MAX_LOG_ENTRIES (200)
+        s.log_request("a.local", "GET", f"/{i}", 200, 1, "text/html")
+    recent = s.recent(limit=250)
+    assert len(recent) == 200
+    assert recent[0]["path"] == "/249"  # newest kept, oldest dropped
+
+
+def test_recent_empty_by_default():
+    s = Stats()
+    assert s.recent() == []
+
+
 # ── Extreme: concurrency ────────────────────────────────────────────────
 def test_concurrent_hits_no_lost_updates():
     s = Stats()

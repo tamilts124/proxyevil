@@ -101,6 +101,31 @@ def test_reset_all_no_token_required_when_unset(server):
     assert st.snapshot()["mybook.local"]["requests"] == 0
 
 
+def test_logs_json_endpoint_returns_recent_requests(server):
+    _, _, st, port = server
+    st.log_request("mybook.local", "GET", "/x", 200, 10, "text/html")
+    status, body = _get(port, "/logs.json")
+    data = json.loads(body)
+    assert status == 200
+    assert data[0]["path"] == "/x"
+
+
+def test_logs_json_limit_query_param(server):
+    _, _, st, port = server
+    for i in range(5):
+        st.log_request("mybook.local", "GET", f"/l{i}", 200, 1, "text/html")
+    status, body = _get(port, "/logs.json?limit=2")
+    data = json.loads(body)
+    assert status == 200 and len(data) == 2
+
+
+def test_logs_json_bad_limit_falls_back_to_default(server):
+    _, _, _, port = server
+    status, body = _get(port, "/logs.json?limit=notanumber")
+    assert status == 200
+    assert isinstance(json.loads(body), list)
+
+
 # ── Medium: unknown routes / bad methods ──────────────────────────────────
 def test_unknown_get_route_404(server):
     _, _, _, port = server

@@ -9,6 +9,7 @@ GET  /status            Alias for /
 GET  /proxy.pac         PAC file for browser auto-config
 GET  /hosts             Plain-text /etc/hosts block
 GET  /stats.json        Machine-readable stats JSON (includes top-level totals)
+GET  /logs.json?limit=N Recent requests ring buffer (newest first, default 100, max 200)
 GET  /config.json       Currently running config (strips _comments)
 GET  /health            JSON health check (for Docker / uptime monitors)
 GET  /reset/<fake>      Reset one alias's stats + redirect to dashboard
@@ -45,6 +46,7 @@ import threading
 from html import escape as _html_escape
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs
 
 from alias_map import AliasMap
 from config    import load_config, save_config
@@ -251,6 +253,8 @@ class _SidecarHandler(BaseHTTPRequestHandler):
             self._serve_aliases_json()
         elif p == "/stats.json":
             self._serve_stats_json()
+        elif p == "/logs.json":
+            self._serve_logs_json()
         elif p == "/config.json":
             self._serve_config_json()
         elif p == "/health":
@@ -360,6 +364,16 @@ class _SidecarHandler(BaseHTTPRequestHandler):
             "total_errors":          total_errors,
             "aliases":               snap,
         }, indent=2).encode()
+        self._respond(200, "application/json", payload)
+
+    def _serve_logs_json(self):
+        qs = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+        try:
+            limit = int(qs.get("limit", ["100"])[0])
+        except (ValueError, IndexError):
+            limit = 100
+        limit = max(1, min(limit, 200))
+        payload = json.dumps(self.stats.recent(limit), indent=2).encode()
         self._respond(200, "application/json", payload)
 
     def _serve_aliases_json(self):

@@ -281,13 +281,19 @@ class DomainAliasAddon:
         self._inject(flow, ctx_fake)
 
         self.stats.hit(ctx_fake, bytes_rw, content_type=_ct_bucket(ct))
+        resp_size = len(flow.response.content or b"")
+        resp_ct   = ct.split(";")[0].strip()
         self._write_access(
             flow.request.method,
             ctx_fake,
             flow.request.path,
             flow.response.status_code,
-            len(flow.response.content or b""),
-            ct.split(";")[0].strip(),
+            resp_size,
+            resp_ct,
+        )
+        self.stats.log_request(
+            ctx_fake, flow.request.method, flow.request.path,
+            flow.response.status_code, resp_size, resp_ct,
         )
 
         if self.cfg.get("capture_responses", False):

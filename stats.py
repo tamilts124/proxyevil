@@ -16,8 +16,11 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Optional
+
+_MAX_LOG_ENTRIES = 200
 
 log = logging.getLogger("proxyevil.stats")
 
@@ -46,6 +49,7 @@ class Stats:
         self._lock = threading.Lock()
         self._data: dict[str, dict] = {}
         self._gen: int = 0   # incremented on every mutation; exposed in snapshot
+        self._recent: deque = deque(maxlen=_MAX_LOG_ENTRIES)  # ring buffer of recent requests
 
     def init(self, fake_domains: list[str]):
         """Pre-seed counters so all known aliases appear in the dashboard.
@@ -84,6 +88,33 @@ class Stats:
                 entry["rewrites"]             += 1
                 entry["rewrite_by_type"][bucket] += 1
             self._gen += 1
+
+    def log_request(self, fake: str, method: str, path: str, status: int,
+                     size: int, content_type: str = ""):
+        """Append one entry to the in-memory recent-requests ring buffer.
+
+        Independent of the on-disk access_log (which is opt-in); this buffer
+        is always maintained (bounded to _MAX_LOG_ENTRIES) so the sidecar
+        dashboard can offer a live requests viewer with zero file I/O.
+        """
+        entry = {
+            "ts":       time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "fake":     fake,
+            "method":   method,
+            "path":     path,
+            "status":   status,
+            "size":     size,
+            "content_type": content_type,
+        }
+        with self._lock:
+            self._recent.append(entry)
+
+    def recent(self, limit: int = _MAX_LOG_ENTRIES) -> list:
+        """Return up to *limit* most recent request entries, newest first."""
+        with self._lock:
+            items = list(self._recent)
+        items.reverse()
+        return items[:max(0, limit)]
 
     def error(self, fake: str):
         """Record a processing error for *fake* (shown in dashboard)."""
