@@ -72,6 +72,27 @@ def _ct_bucket(ct: str) -> str:
     return "other"
 
 
+def _host_matches_blacklist(host: str, patterns: list) -> bool:
+    """True if *host* matches any blacklist pattern.
+
+    Patterns are case-insensitive. A leading "*." matches the domain itself
+    and any subdomain (e.g. "*.example.com" matches "example.com" and
+    "api.example.com"); anything else must match the host exactly.
+    """
+    host = (host or "").lower().strip().rstrip(".")
+    for raw in patterns:
+        pat = str(raw).lower().strip().rstrip(".")
+        if not pat:
+            continue
+        if pat.startswith("*."):
+            base = pat[2:]
+            if host == base or host.endswith("." + base):
+                return True
+        elif host == pat:
+            return True
+    return False
+
+
 class DomainAliasAddon:
     """Bidirectional domain rewriter registered as a mitmproxy addon."""
 
@@ -171,6 +192,17 @@ class DomainAliasAddon:
 
     def request(self, flow: mhttp.HTTPFlow):
         host = flow.request.pretty_host
+
+        blacklist = self.cfg.get("blacklist", [])
+        if blacklist and _host_matches_blacklist(host, blacklist):
+            log.info(f"[BLOCK] {flow.request.method} {host}{flow.request.path} — blacklisted")
+            flow.response = mhttp.Response.make(
+                403, b"Blocked by proxyevil domain blacklist",
+                {"Content-Type": "text/plain"},
+            )
+            self.stats.error(host)
+            return
+
         real = self.aliases.real_for(host)
         if real is None:
             return

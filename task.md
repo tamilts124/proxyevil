@@ -22,7 +22,7 @@ todo / in-progress / done / tested / blocked
 - [x] Extreme: large HTML body (multi-MB) rewrite perf/memory test — status: tested (tests/test_perf.py, 2 tests: 5MB body rewritten <5s/<6x mem, 8MB body over-limit skipped <1s)
 - [x] addon.py line count re-check (post-fix, ~565 lines) — no split needed — status: done
 
-## Current test count: 104 passing (`py -m pytest tests/`)
+## Current test count: 116 passing (`py -m pytest tests/`)
 ## All planned test modules complete (alias_map, codec, config, stats, addon, certs, hosts_manager, sidecar, watcher).
 ## Next: proactive extensions — see below.
 
@@ -30,5 +30,6 @@ todo / in-progress / done / tested / blocked
 - [x] logfilter.py test coverage (currently untested module) — status: tested (tests/test_logfilter.py, 11 tests: noise suppression, WinError downgrade, TLS/lifecycle allow-list, idempotent install)
 - [x] Sidecar: request logs viewer endpoint (recent N requests ring buffer) — status: tested
   - impl: Stats.log_request()/recent() thread-safe deque(maxlen=200) in stats.py; wired from addon.py response handler; GET /logs.json?limit=N in sidecar.py (7 new tests across stats+sidecar)
-- [ ] Sidecar: domain blacklist feature (block specific hosts from being proxied) — status: todo
+- [x] Sidecar: domain blacklist feature (block specific hosts from being proxied) — status: tested
+  - impl: config.py `blacklist` key (list[str], validated), addon.py `_host_matches_blacklist()` (exact + "*.domain" wildcard, case/trailing-dot insensitive) checked at top of `request()` before alias resolution → 403 response, stats.error() recorded. 12 new tests (addon + config).
 - [ ] alias_map.py: cache the compiled real/fake regex needle scan with a single combined Aho-Corasick-style search for large alias counts — status: todo

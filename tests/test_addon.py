@@ -8,7 +8,7 @@ import gzip
 import pytest
 from alias_map import AliasMap
 from stats import Stats
-from addon import DomainAliasAddon
+from addon import DomainAliasAddon, _host_matches_blacklist
 
 
 class FakeHeaders(dict):
@@ -162,6 +162,61 @@ def test_valid_gzip_body_rewritten(addon):
     addon.response(flow)
     out = gzip.decompress(flow.response.content)
     assert b"mybook.local" in out and b"facebook.com" not in out
+
+
+# ── Blacklist: blocked hosts get 403, never reach rewrite logic ──────────
+def test_host_matches_blacklist_exact():
+    assert _host_matches_blacklist("ads.example.com", ["ads.example.com"])
+    assert not _host_matches_blacklist("other.com", ["ads.example.com"])
+
+
+def test_host_matches_blacklist_wildcard():
+    assert _host_matches_blacklist("track.ads.com", ["*.ads.com"])
+    assert _host_matches_blacklist("ads.com", ["*.ads.com"])  # base domain itself
+    assert not _host_matches_blacklist("badsads.com", ["*.ads.com"])  # no dot boundary
+
+
+def test_host_matches_blacklist_case_and_trailing_dot():
+    assert _host_matches_blacklist("ADS.example.com.", ["ads.example.com"])
+
+
+def test_host_matches_blacklist_empty_patterns():
+    assert not _host_matches_blacklist("anything.com", [])
+
+
+def test_blacklisted_exact_host_blocked(aliases):
+    cfg = {"rewrite": {}, "strip_headers": [], "SPOOFING_EXCLUDE_LIST": [],
+           "blacklist": ["ads.example.com"], "data_dir": "evil_data_test"}
+    a = DomainAliasAddon(aliases, cfg, Stats())
+    flow = FakeFlow(FakeRequest("ads.example.com", "/x"))
+    a.request(flow)
+    assert flow.response is not None
+    assert flow.response.status_code == 403
+
+
+def test_blacklisted_wildcard_subdomain_blocked(aliases):
+    cfg = {"rewrite": {}, "strip_headers": [], "SPOOFING_EXCLUDE_LIST": [],
+           "blacklist": ["*.ads.example.com"], "data_dir": "evil_data_test"}
+    a = DomainAliasAddon(aliases, cfg, Stats())
+    flow = FakeFlow(FakeRequest("track.ads.example.com", "/x"))
+    a.request(flow)
+    assert flow.response is not None
+    assert flow.response.status_code == 403
+
+
+def test_non_blacklisted_host_not_blocked(aliases):
+    cfg = {"rewrite": {}, "strip_headers": [], "SPOOFING_EXCLUDE_LIST": [],
+           "blacklist": ["ads.example.com"], "data_dir": "evil_data_test"}
+    a = DomainAliasAddon(aliases, cfg, Stats())
+    flow = FakeFlow(FakeRequest("unrelated.com", "/x"))
+    a.request(flow)
+    assert flow.response is None
+
+
+def test_empty_blacklist_blocks_nothing(addon):
+    flow = FakeFlow(FakeRequest("mybook.local", "/x"))
+    addon.request(flow)
+    assert flow.response is None  # normal rewrite path taken, no block
 
 
 # ── Extreme: oversized body skipped safely ────────────────────────────────

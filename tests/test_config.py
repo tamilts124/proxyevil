@@ -61,6 +61,32 @@ def test_alias_bad_type_exits(tmp_path):
         config_mod.load_config(str(p))
 
 
+def test_blacklist_default_empty(tmp_path):
+    cfg = config_mod.load_config(str(tmp_path / "nope.json"))
+    assert cfg["blacklist"] == []
+
+
+def test_blacklist_valid_list_accepted(tmp_path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"blacklist": ["ads.example.com", "*.tracker.com"]}))
+    cfg = config_mod.load_config(str(p))
+    assert cfg["blacklist"] == ["ads.example.com", "*.tracker.com"]
+
+
+def test_blacklist_non_list_exits(tmp_path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"blacklist": "not-a-list"}))
+    with pytest.raises(SystemExit):
+        config_mod.load_config(str(p))
+
+
+def test_blacklist_non_string_items_exits(tmp_path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({"blacklist": ["ok.com", 123]}))
+    with pytest.raises(SystemExit):
+        config_mod.load_config(str(p))
+
+
 def test_legacy_spoof_key_normalized(tmp_path):
     p = tmp_path / "config.json"
     p.write_text(json.dumps({"SPOOF_ALL_UNMAPPED_DOMAINS": True}))

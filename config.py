@@ -37,6 +37,9 @@ DEFAULTS: dict = {
     "auto_install_ca": False,
     "SPOOF_ALL_DOMAINS": False,
     "SPOOFING_EXCLUDE_LIST": [],
+    # Hostnames to block outright (403) instead of proxying. Supports exact
+    # matches ("ads.example.com") or "*.example.com" wildcard subdomain matches.
+    "blacklist": [],
     "aliases":        {},
     "rewrite": {
         "html":    True,
@@ -169,6 +172,14 @@ def _validate(cfg: dict):
             errors.append(f"  'SPOOFING_EXCLUDE_LIST' must be a list of strings, got {sel!r}")
         elif not all(isinstance(x, str) for x in sel):
             errors.append(f"  'SPOOFING_EXCLUDE_LIST' must only contain strings, got {sel!r}")
+
+    # blacklist validation
+    bl = cfg.get("blacklist")
+    if bl is not None:
+        if not isinstance(bl, list):
+            errors.append(f"  'blacklist' must be a list of strings, got {bl!r}")
+        elif not all(isinstance(x, str) for x in bl):
+            errors.append(f"  'blacklist' must only contain strings, got {bl!r}")
 
     aliases = cfg.get("aliases", {})
     for fake, val in aliases.items():
