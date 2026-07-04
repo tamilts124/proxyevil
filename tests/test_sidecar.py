@@ -75,6 +75,15 @@ def test_stats_json_endpoint(server):
     assert data["aliases"]["mybook.local"]["requests"] == 1
 
 
+def test_stats_json_includes_alias_cache_metrics(server):
+    _, am, _, port = server
+    am.fake_for("www.facebook.com")
+    status, body = _get(port, "/stats.json")
+    data = json.loads(body)
+    assert "alias_cache" in data
+    assert "hits" in data["alias_cache"] and "misses" in data["alias_cache"]
+
+
 def test_hosts_endpoint_contains_alias(server):
     _, _, _, port = server
     status, body = _get(port, "/hosts")

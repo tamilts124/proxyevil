@@ -402,6 +402,7 @@ class _SidecarHandler(BaseHTTPRequestHandler):
             "total_bytes_rewritten": total_bytes,
             "total_errors":          total_errors,
             "aliases":               snap,
+            "alias_cache":           self.alias_map.cache_stats(),
         }, indent=2).encode()
         self._respond(200, "application/json", payload)
 

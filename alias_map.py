@@ -144,6 +144,12 @@ class AliasMap:
         self._family_fake_to_real: dict[str, dict[str, str]] = {}
         self._family_exclude_lists: dict[str, list[str]] = {}
 
+        # Cache hit/miss counters (lifetime of this AliasMap instance; not
+        # reset by config reloads/_load, since they measure lookup-cache
+        # effectiveness over the whole process run).
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
+
         self._load(aliases)
 
     # ── internal ──────────────────────────────────────────────────────────────
@@ -247,8 +253,10 @@ class AliasMap:
         with self._lock:
             if fake in self._real_cache:
                 self._real_cache.move_to_end(fake)
+                self._cache_hits += 1
                 return self._real_cache[fake]
 
+            self._cache_misses += 1
             result = None
             if fake in self._fake_to_real:
                 result = self._fake_to_real[fake]
@@ -270,8 +278,10 @@ class AliasMap:
         with self._lock:
             if real in self._fake_cache:
                 self._fake_cache.move_to_end(real)
+                self._cache_hits += 1
                 return self._fake_cache[real]
 
+            self._cache_misses += 1
             result = None
             if real in self._real_to_fake:
                 result = self._real_to_fake[real]
@@ -296,6 +306,23 @@ class AliasMap:
 
     def fake_for(self, real: str) -> Optional[str]:
         return self._fake_for_cached(real.lower())
+
+    def cache_stats(self) -> dict:
+        """Lookup-cache effectiveness since this AliasMap was created.
+
+        hit_rate is None when there have been zero lookups yet (avoids a
+        misleading 0%/100% before any traffic has been processed).
+        """
+        with self._lock:
+            hits, misses = self._cache_hits, self._cache_misses
+            total = hits + misses
+            return {
+                "hits":        hits,
+                "misses":      misses,
+                "hit_rate":    (hits / total) if total else None,
+                "real_cache_size": len(self._real_cache),
+                "fake_cache_size": len(self._fake_cache),
+            }
 
     def _get_root_fake(self, fake: str) -> str:
         """Find the root fake alias domain by traversing parents recursively.

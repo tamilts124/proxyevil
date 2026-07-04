@@ -109,6 +109,31 @@ def test_combined_pattern_scales_with_many_aliases():
     assert not m.contains_real_needle(b"nothing here " * 1000)
 
 
+# ── Cache hit/miss metrics ─────────────────────────────────────────────────
+def test_cache_stats_zero_lookups_hit_rate_none():
+    m = AliasMap({})
+    stats = m.cache_stats()
+    assert stats["hits"] == 0 and stats["misses"] == 0
+    assert stats["hit_rate"] is None
+
+
+def test_cache_stats_counts_miss_then_hit(am):
+    am.fake_for("www.facebook.com")   # first call: miss (populates cache)
+    am.fake_for("www.facebook.com")   # second call: hit
+    stats = am.cache_stats()
+    assert stats["misses"] >= 1
+    assert stats["hits"] >= 1
+    assert 0 <= stats["hit_rate"] <= 1
+
+
+def test_cache_stats_sizes_reflect_populated_entries(am):
+    am.fake_for("www.facebook.com")
+    am.real_for("mybook.local")
+    stats = am.cache_stats()
+    assert stats["fake_cache_size"] >= 1
+    assert stats["real_cache_size"] >= 1
+
+
 # ── Extreme / concurrency ────────────────────────────────────────────────
 def test_concurrent_dynamic_registration():
     m = AliasMap({})
