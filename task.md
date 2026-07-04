@@ -27,7 +27,7 @@ todo / in-progress / done / tested / blocked
 ## Next: proactive extensions — see below.
 
 ## Proactive extension ideas (todo, not yet started)
-- [ ] logfilter.py test coverage (currently untested module) — status: todo
+- [x] logfilter.py test coverage (currently untested module) — status: tested (tests/test_logfilter.py, 11 tests: noise suppression, WinError downgrade, TLS/lifecycle allow-list, idempotent install)
 - [ ] Sidecar: request logs viewer endpoint (recent N requests ring buffer) — status: todo
 - [ ] Sidecar: domain blacklist feature (block specific hosts from being proxied) — status: todo
 - [ ] alias_map.py: cache the compiled real/fake regex needle scan with a single combined Aho-Corasick-style search for large alias counts — status: todo
