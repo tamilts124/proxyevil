@@ -37,7 +37,7 @@ todo / in-progress / done / tested / blocked
 - [x] alias_map.py: LRU-cache hit/miss counters exposed via /stats.json — status: tested
   - impl: `AliasMap.cache_stats()` (hits/misses/hit_rate/cache sizes) surfaced as `alias_cache` in sidecar `/stats.json`. 4 tests.
 
-## Current test count: 149 passing (`py -m pytest tests/`)
+## Current test count: 152 passing (`py -m pytest tests/`)
 
 ## Round 3 (proactive extensions, in progress)
 - [x] certs.py: automated certificate renewal (check mkcert CA/leaf expiry, regenerate before expiry) — status: tested
@@ -63,6 +63,7 @@ todo / in-progress / done / tested / blocked
 
 
 ## Round 5 (proactive, todo)
-- [ ] addon.py: response body size streaming/backpressure audit (mirror codec.py cap at the flow level, not just decompress) — status: todo
+- [x] addon.py: request/response body size cap audit — status: tested
+  - audit: response()->_rewrite_body() already checked body_size_limit on both compressed and decompressed sizes. request() body handling had NO such check — relied only on codec.py's internal 64MB hard cap, inconsistent with the response path's smaller configurable default (10MB). Fixed: request() now checks len(raw) and len(decompressed) against self.body_size_limit before rewriting, mirroring _rewrite_body (via a _SkipBody sentinel to skip cleanly without logging as an error). 3 new tests (21 total in test_addon.py).
 - [ ] hosts_manager.py: cross-platform audit (macOS/Linux sudo prompts vs Windows admin) — status: todo
 - [ ] stats.py: persist ring-buffer logs across restarts (currently in-memory only) — status: todo

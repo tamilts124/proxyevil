@@ -19,6 +19,13 @@ from stats     import Stats
 
 log = logging.getLogger("proxyevil.addon")
 
+
+class _SkipBody(Exception):
+    """Internal control-flow sentinel: raised to bail out of request-body
+    rewriting when the body exceeds body_size_limit, without it being logged
+    as an unexpected error.
+    """
+
 _BINARY_TYPES = {
     "image/", "video/", "audio/", "font/",
     "application/octet-stream", "application/pdf",
@@ -243,10 +250,16 @@ class DomainAliasAddon:
             if any(t in ct for t in ("json", "form", "text", "xml")):
                 try:
                     raw = flow.request.content
+                    if len(raw) > self.body_size_limit:
+                        log.debug(f"[REQ body] skipping {len(raw) // 1024}KB compressed body (over limit)")
+                        raise _SkipBody
                     if enc and enc != "identity":
                         decompressed, did_decompress, actual_enc = decompress(raw, enc)
                     else:
                         decompressed, did_decompress, actual_enc = raw, False, enc
+                    if len(decompressed) > self.body_size_limit:
+                        log.debug(f"[REQ body] skipping {len(decompressed) // 1024}KB decompressed body (over limit)")
+                        raise _SkipBody
 
                     body_text = decompressed.decode("utf-8", errors="replace")
                     new_text  = self.aliases.rewrite_fake_to_real(
@@ -264,6 +277,8 @@ class DomainAliasAddon:
                             del flow.request.headers["content-encoding"]
                         flow.request.content                   = new_bytes
                         flow.request.headers["content-length"] = str(len(new_bytes))
+                except _SkipBody:
+                    pass
                 except Exception as exc:
                     log.debug(f"[REQ body] {exc}")
                     self.stats.error(flow.metadata.get(_META_FAKE, host))

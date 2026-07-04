@@ -233,3 +233,36 @@ def test_oversized_body_skipped(aliases):
     flow.metadata["proxyevil.fake"] = "mybook.local"
     a.response(flow)
     assert flow.response.content == big  # untouched — over size limit
+
+
+# ── Extreme: request body size cap (mirrors response-side body_size_limit) ──
+def test_request_body_over_limit_skipped(addon):
+    addon.cfg["max_body_bytes"] = 1024
+    big = b'{"a":"' + b"x" * 2000 + b'"}'
+    req = FakeRequest("mybook.local", headers={"content-type": "application/json"}, content=big)
+    flow = FakeFlow(req)
+    addon.request(flow)
+    # body left untouched — size cap tripped before any rewrite attempt
+    assert flow.request.content == big
+
+
+def test_request_body_decompressed_over_limit_skipped(addon):
+    addon.cfg["max_body_bytes"] = 1024
+    big = b'{"real":"' + b"www.facebook.com " * 200 + b'"}'
+    comp = gzip.compress(big)
+    req = FakeRequest("mybook.local",
+                       headers={"content-type": "application/json", "content-encoding": "gzip"},
+                       content=comp)
+    flow = FakeFlow(req)
+    addon.request(flow)
+    assert flow.request.content == comp  # untouched, still gzip-encoded
+    assert flow.request.headers["content-encoding"] == "gzip"
+
+
+def test_request_body_under_limit_still_rewritten(addon):
+    addon.cfg["max_body_bytes"] = 1024 * 1024
+    body = b'{"ref":"mybook.local"}'
+    req = FakeRequest("mybook.local", headers={"content-type": "application/json"}, content=body)
+    flow = FakeFlow(req)
+    addon.request(flow)
+    assert b"www.facebook.com" in flow.request.content
