@@ -22,6 +22,46 @@ _MAX_DECOMP = 64 * 1024 * 1024
 _BROTLI_QUALITY = 6
 
 
+def _zlib_streaming_decompress(data: bytes, wbits: int) -> "bytes | None":
+    """Incrementally zlib-decompress *data*, capping output at _MAX_DECOMP.
+    Returns None if the cap would be exceeded (caller treats as skip).
+    Raises zlib.error on malformed input (caller falls back to raw deflate).
+    """
+    d   = zlib.decompressobj(wbits)
+    out = io.BytesIO()
+    chunk = data
+    while True:
+        piece = d.decompress(chunk, 65536)
+        out.write(piece)
+        if out.tell() > _MAX_DECOMP:
+            return None
+        if d.unconsumed_tail:
+            chunk = d.unconsumed_tail
+            continue
+        break
+    out.write(d.flush())
+    if out.tell() > _MAX_DECOMP:
+        return None
+    return out.getvalue()
+
+
+def _brotli_streaming_decompress(data: bytes, brotli_mod) -> "bytes | None":
+    """Incrementally brotli-decompress *data* using the streaming Decompressor
+    API, capping output at _MAX_DECOMP. Returns None if exceeded.
+    """
+    dec = brotli_mod.Decompressor()
+    out = io.BytesIO()
+    # Feed in bounded input chunks too, so a highly-compressed small input
+    # can't expand unboundedly in a single internal call.
+    step = 65536
+    for i in range(0, len(data), step):
+        piece = dec.process(data[i:i + step]) if hasattr(dec, "process") else dec.decompress(data[i:i + step])
+        out.write(piece)
+        if out.tell() > _MAX_DECOMP:
+            return None
+    return out.getvalue()
+
+
 def decompress(data: bytes, encoding: str) -> Tuple[bytes, bool, str]:
     """Decompress *data* according to *encoding*.
 
@@ -47,15 +87,21 @@ def decompress(data: bytes, encoding: str) -> Tuple[bytes, bool, str]:
             return buf.getvalue(), True, enc
         if enc in ("deflate", "zlib"):
             try:
-                return zlib.decompress(data), True, "deflate"
+                out = _zlib_streaming_decompress(data, zlib.MAX_WBITS)
+                actual = "deflate"
             except zlib.error:
-                return zlib.decompress(data, -zlib.MAX_WBITS), True, "deflate-raw"
+                out = _zlib_streaming_decompress(data, -zlib.MAX_WBITS)
+                actual = "deflate-raw"
+            if out is None:
+                log.warning(f"[CODEC] deflate decompressed size exceeds limit {_MAX_DECOMP} — skipping")
+                return data, False, enc
+            return out, True, actual
         if enc == "br":
             try:
                 import brotli  # type: ignore
-                out = brotli.decompress(data)
-                if len(out) > _MAX_DECOMP:
-                    log.warning(f"[CODEC] br decompressed size {len(out)} exceeds limit {_MAX_DECOMP} — skipping")
+                out = _brotli_streaming_decompress(data, brotli)
+                if out is None:
+                    log.warning(f"[CODEC] br decompressed size exceeds limit {_MAX_DECOMP} — skipping")
                     return data, False, enc
                 return out, True, enc
             except ImportError:

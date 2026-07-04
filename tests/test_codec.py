@@ -73,3 +73,43 @@ def test_corrupt_zstd_falls_back():
 def test_recompress_unknown_encoding_fails_safely():
     out, ok = recompress(b"data", "identity")
     assert ok is False and out == b"data"
+
+
+# ── Extreme: streaming decompression size cap (zip-bomb style protection) ────
+def test_deflate_decompress_respects_size_cap(monkeypatch):
+    import codec
+    monkeypatch.setattr(codec, "_MAX_DECOMP", 1024)
+    big = b"A" * (1024 * 1024)
+    comp = zlib.compress(big)
+    out, ok, enc = codec.decompress(comp, "deflate")
+    assert ok is False
+    assert out == comp
+
+
+def test_deflate_decompress_under_cap_succeeds(monkeypatch):
+    import codec
+    monkeypatch.setattr(codec, "_MAX_DECOMP", 1024 * 1024)
+    data = b"hello world" * 10
+    comp = zlib.compress(data)
+    out, ok, enc = codec.decompress(comp, "deflate")
+    assert ok is True and out == data and enc == "deflate"
+
+
+def test_brotli_decompress_respects_size_cap(monkeypatch):
+    brotli = pytest.importorskip("brotli")
+    import codec
+    monkeypatch.setattr(codec, "_MAX_DECOMP", 1024)
+    big = b"B" * (1024 * 1024)
+    comp = brotli.compress(big)
+    out, ok, enc = codec.decompress(comp, "br")
+    assert ok is False
+    assert out == comp
+
+
+def test_brotli_decompress_under_cap_succeeds():
+    brotli = pytest.importorskip("brotli")
+    import codec
+    data = b"hello brotli" * 10
+    comp = brotli.compress(data)
+    out, ok, enc = codec.decompress(comp, "br")
+    assert ok is True and out == data

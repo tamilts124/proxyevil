@@ -37,7 +37,7 @@ todo / in-progress / done / tested / blocked
 - [x] alias_map.py: LRU-cache hit/miss counters exposed via /stats.json — status: tested
   - impl: `AliasMap.cache_stats()` (hits/misses/hit_rate/cache sizes) surfaced as `alias_cache` in sidecar `/stats.json`. 4 tests.
 
-## Current test count: 136 passing (`py -m pytest tests/`)
+## Current test count: 139 passing (`py -m pytest tests/`)
 
 ## Round 3 (proactive extensions, in progress)
 - [x] certs.py: automated certificate renewal (check mkcert CA/leaf expiry, regenerate before expiry) — status: tested
@@ -46,4 +46,12 @@ todo / in-progress / done / tested / blocked
   - audit: watchfiles' own `watch(path, debounce=500)` already coalesces bursts of raw fs events into a single yield within the window, so editors writing multiple times per save don't trigger multiple reloads. No separate debounce layer needed; behavior locked in by existing tests.
 - [x] watcher.py: wire check_and_renew() into a periodic background thread so certs auto-renew without manual --setup — status: tested
   - impl: `start_config_watcher(..., cert_dir=..., renew_interval_s=86400, renew_days_threshold=14)` spawns a daemon `cert-renewer` thread calling `certs.check_and_renew()` on live_cfg aliases. 2 new tests in test_watcher.py (8 total).
-- [ ] codec.py: verify current gzip/br/deflate/zstd coverage; add streaming decompression size cap if missing — status: todo (audit first)
+- [x] codec.py: verify current gzip/br/deflate/zstd coverage; add streaming decompression size cap if missing — status: tested
+  - audit: gzip and zstd already capped (streaming read loop / max_output_size). deflate and br were NOT capped — zlib.decompress()/brotli.decompress() ran to completion before any size check, a zip-bomb risk. Fixed via `_zlib_streaming_decompress()` (decompressobj + max_length loop) and `_brotli_streaming_decompress()` (chunked brotli.Decompressor().process()), both bailing out (None) once `_MAX_DECOMP` is exceeded mid-stream. 4 new tests in test_codec.py (14 total).
+
+## Round 3: complete — all items tested. See Round 4 below for next proactive batch.
+
+## Round 4 (proactive, todo)
+- [ ] sidecar.py: auth/rate-limit for /logs.json and /stats.json endpoints (currently token-gated only, no rate limit) — status: todo
+- [ ] alias_map.py: hot-reload safety — verify reload() is atomic under concurrent request handling (thread safety audit) — status: todo
+- [ ] config.py: schema versioning / migration path for older config.json files — status: todo
