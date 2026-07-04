@@ -460,16 +460,17 @@ class DomainAliasAddon:
         # to the full rewrite which handles case via the regex (re.IGNORECASE).
         # This avoids both the original wasteful full-copy AND the fix-#5 regression
         # where mixed-case domains (e.g. FACEBOOK.COM in JSON) were silently skipped.
-        if not spoof_enabled:
+        # Fix: SRI integrity= attrs must be stripped even when the body has no
+        # real-domain reference to rewrite (e.g. third-party CDN <script> tags
+        # on an otherwise-unrelated page) — bypass the domain-needle precheck
+        # in that case so _SRI_RE.sub() below still runs.
+        has_sri = is_html and rw.get("html", True) and b"integrity=" in decompressed.lower()
+
+        if not spoof_enabled and not has_sri:
             if did_decompress or not enc or enc == "identity":
-                if len(decompressed) <= _PRECHECK_LIMIT:
-                    dec_lower = decompressed.lower()
-                    if not any(n in dec_lower for n in self.aliases._real_needles):
-                        return 0
-                else:
-                    dec_lower = decompressed.lower()
-                    if not any(n in dec_lower for n in self.aliases._real_needles):
-                        return 0
+                dec_lower = decompressed.lower()
+                if not any(n in dec_lower for n in self.aliases._real_needles):
+                    return 0
 
         charset = "utf-8"
         if "charset=" in ct:
@@ -529,13 +530,16 @@ class DomainAliasAddon:
                     log.info(f"[DYNAMIC SPOOF] registered {added} dynamic alias(es) ({self._dynamic_alias_count}/{max_dynamic})")
                     flow._proxyevil_aliases_modified = True
 
+        original_text = text  # Fix: baseline for the "anything changed?" check below,
+                              # captured BEFORE SRI stripping so an SRI-only change
+                              # (no domain rewrite) is still detected and written back.
         if is_html and rw.get("html", True):
             text = _SRI_RE.sub("", text)
 
         new_text = self.aliases.rewrite_real_to_fake(
             text, context_fake=fake if fake else None, global_spoof=global_spoof, exclude_list=exclude_list
         )
-        if new_text == text:
+        if new_text == original_text:
             return 0
 
         try:

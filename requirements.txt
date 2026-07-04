@@ -1,5 +1,5 @@
 # Core
-mitmproxy>=10.3.0,<12.0     # HTTPS interception engine; API changes between majors
+mitmproxy>=10.3.0,<13.0     # HTTPS interception engine; API changes between majors
 watchfiles>=0.21.0           # inotify-backed config hot-reload; falls back gracefully if absent
 
 # Optional but strongly recommended
