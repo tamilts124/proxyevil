@@ -7,7 +7,14 @@ import logging
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+try:
+    from cryptography import x509
+    _HAVE_CRYPTOGRAPHY = True
+except ImportError:  # pragma: no cover - cryptography ships with mitmproxy
+    _HAVE_CRYPTOGRAPHY = False
 
 log = logging.getLogger("proxyevil.certs")
 
@@ -24,11 +31,37 @@ def _is_safe_domain(domain: str) -> bool:
     return bool(_SAFE_DOMAIN_RE.match(domain)) and ".." not in domain
 
 
-def setup_certs(aliases: dict, cert_dir: str):
+def cert_expiry(cert_file) -> "datetime | None":
+    """Return the UTC expiry datetime of a PEM cert, or None if unreadable/unparseable."""
+    if not _HAVE_CRYPTOGRAPHY:
+        log.debug("[CERT] cryptography package unavailable; cannot check expiry")
+        return None
+    try:
+        data = Path(cert_file).read_bytes()
+        cert = x509.load_pem_x509_certificate(data)
+        return cert.not_valid_after_utc
+    except Exception as exc:
+        log.warning(f"[CERT] could not parse expiry for {cert_file}: {exc}")
+        return None
+
+
+def needs_renewal(cert_file, days_threshold: int = 14) -> bool:
+    """True if cert_file expires within days_threshold, is unparseable, or missing."""
+    p = Path(cert_file)
+    if not p.exists():
+        return True
+    expiry = cert_expiry(p)
+    if expiry is None:
+        return False  # can't tell — don't force renewal, avoid needless churn
+    return expiry - datetime.now(timezone.utc) <= timedelta(days=days_threshold)
+
+
+def setup_certs(aliases: dict, cert_dir: str, renew_days: int = 14):
     """Generate per-alias TLS certificates using mkcert.
 
-    Skips domains that already have certs.  Exits with an error message if
-    mkcert is not on PATH.
+    Skips domains that already have valid (non-expiring-soon) certs.
+    Regenerates certs expiring within *renew_days*. Exits with an error
+    message if mkcert is not on PATH.
     """
     p = Path(cert_dir)
     p.mkdir(parents=True, exist_ok=True)
@@ -49,8 +82,11 @@ def setup_certs(aliases: dict, cert_dir: str):
         cert_file = p / f"{fake}.pem"
         key_file  = p / f"{fake}-key.pem"
         if cert_file.exists() and key_file.exists():
-            print(f"[CERT] already exists: {cert_file.name}")
-            continue
+            if needs_renewal(cert_file, renew_days):
+                print(f"[CERT] renewing (expiring soon): {cert_file.name}")
+            else:
+                print(f"[CERT] already exists: {cert_file.name}")
+                continue
         print(f"[CERT] generating cert for {fake} …")
         result = subprocess.run(
             [
@@ -122,6 +158,36 @@ def collect_certs(aliases: dict, cert_dir: str) -> list[tuple[str, str]]:
             f"{missing} will use mitmproxy CA (run --setup to generate missing certs)"
         )
     return pairs
+
+
+def check_and_renew(aliases: dict, cert_dir: str, days_threshold: int = 14) -> list[str]:
+    """Non-interactive expiry sweep: renews any alias cert expiring within
+    *days_threshold* days. Returns the list of renewed domain names.
+    Intended for periodic calls (e.g. from watcher.py) without the
+    setup_certs() 'already exists' console chatter.
+    """
+    p = Path(cert_dir)
+    if not shutil.which("mkcert"):
+        log.warning("[CERT] mkcert not found; skipping renewal check")
+        return []
+    renewed = []
+    for fake in aliases.keys():
+        if not _is_safe_domain(fake):
+            continue
+        cert_file = p / f"{fake}.pem"
+        key_file  = p / f"{fake}-key.pem"
+        if not (cert_file.exists() and key_file.exists()) or not needs_renewal(cert_file, days_threshold):
+            continue
+        result = subprocess.run(
+            ["mkcert", "-cert-file", str(cert_file), "-key-file", str(key_file), fake, f"*.{fake}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            log.info(f"[CERT] renewed {fake}")
+            renewed.append(fake)
+        else:
+            log.warning(f"[CERT] renewal failed for {fake}: {result.stderr}")
+    return renewed
 
 
 def list_certs(cert_dir: str):

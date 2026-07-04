@@ -37,9 +37,11 @@ todo / in-progress / done / tested / blocked
 - [x] alias_map.py: LRU-cache hit/miss counters exposed via /stats.json — status: tested
   - impl: `AliasMap.cache_stats()` (hits/misses/hit_rate/cache sizes) surfaced as `alias_cache` in sidecar `/stats.json`. 4 tests.
 
-## Current test count: 126 passing (`py -m pytest tests/`)
+## Current test count: 134 passing (`py -m pytest tests/`)
 
-## Round 3 (todo, not yet started)
-- [ ] certs.py: automated certificate renewal (check mkcert CA/leaf expiry, regenerate before expiry) — status: todo
+## Round 3 (proactive extensions, in progress)
+- [x] certs.py: automated certificate renewal (check mkcert CA/leaf expiry, regenerate before expiry) — status: tested
+  - impl: `cert_expiry()` (parses PEM via `cryptography.x509`), `needs_renewal(days_threshold=14)`, `check_and_renew()` non-interactive sweep; `setup_certs()` now renews expiring certs instead of only skipping existing ones. 8 new tests in test_certs.py (14 total).
 - [ ] watcher.py: debounce rapid successive config.json writes (avoid reload storm from editors that write multiple times per save) — status: todo
 - [ ] codec.py: verify current gzip/br/deflate/zstd coverage; add streaming decompression size cap if missing — status: todo (audit first)
+- [ ] watcher.py: wire check_and_renew() into the periodic/hot-reload loop so certs auto-renew without manual --setup — status: todo
