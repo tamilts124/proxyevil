@@ -5,21 +5,20 @@ todo / in-progress / done / tested / blocked
 
 ## Tasks
 - [x] Fix addon.py syntax corruption (duplicated class body + unterminated regex from prior cut-off session) — status: tested
-  - notes: Removed corrupted duplicate DomainAliasAddon copy, restored `_is_ip_or_localhost`. All modules py_compile clean.
 - [x] Build tests/ scaffold + pytest config — status: tested
-  - notes: pytest.ini + tests/ package added. `py -m pytest tests/` green.
-- [x] test_alias_map.py — normal/boundary/concurrency domain mapping tests — status: tested (12 tests, all pass)
-- [x] test_codec.py — compression edge cases incl. corrupt bodies — status: tested (12 tests, all pass)
-- [x] test_config.py — schema validation, invalid configs — status: tested (10 tests, all pass)
-- [x] test_stats.py — thread-safety / concurrent counters — status: tested (9 tests, all pass)
-- [x] test_addon.py — mocked HTTPFlow rewrite tests (headers, cookies, SRI strip, security headers, gzip, oversized body) — status: tested (10 tests, all pass)
-  - bug found & fixed: SRI `integrity=` stripping was silently skipped whenever a response body had no real-domain reference (needle precheck bypassed it entirely), AND separately the "did anything change" check compared against the already-SRI-stripped text instead of the original, so SRI-only edits were discarded even when the precheck did run. Both fixed in addon.py `_rewrite_body`.
-- [x] requirements.txt mitmproxy pin — status: done
-  - notes: installed mitmproxy is 12.2.3; loosened pin to `<13.0`.
-- [ ] test_hosts_manager.py — mocked hosts file + privilege/mkcert failures — status: todo
-- [ ] test_sidecar.py — dashboard/PAC/stats endpoints, token auth, origin validation — status: todo
+- [x] test_alias_map.py — status: tested (12 tests)
+- [x] test_codec.py — status: tested (12 tests)
+- [x] test_config.py — status: tested (10 tests)
+- [x] test_stats.py — status: tested (9 tests)
+- [x] test_addon.py — status: tested (10 tests)
+  - bug found & fixed: SRI stripping silently discarded when body had no real-domain match; also "changed?" check compared post-strip text against itself. Both fixed in addon.py `_rewrite_body`.
+- [x] requirements.txt mitmproxy pin loosened to <13.0 (installed: 12.2.3) — status: done
+- [x] test_certs.py — mkcert missing/failure, shell-injection-safety (arg list not shell=True), directory traversal — status: tested (7 tests)
+  - bug found & fixed: certs.py built filesystem paths directly from alias domain names with no validation — a domain like `../../evil` in config.json could escape cert_dir. Added `_is_safe_domain()` hostname validator in certs.py; unsafe names are now skipped with a warning in both setup_certs and collect_certs.
+- [x] test_hosts_manager.py — privilege checks, atomic write, no-op idempotency, unreadable file — status: tested (6 tests)
+- [ ] test_sidecar.py — dashboard/PAC/stats endpoints, token auth, origin validation — status: in-progress
 - [ ] test_watcher.py — config hot-reload behavior — status: todo
-- [ ] Critical: shell-injection test for certs.py mkcert invocation (verify subprocess uses arg list, not shell=True with string interpolation) — status: todo
-- [ ] Critical: directory-traversal test for alias fake/real domain names reaching filesystem paths (captures, certs) — status: todo
 - [ ] Extreme: large HTML body (multi-MB) rewrite perf/memory test — status: todo
-- [ ] addon.py line count re-check (post-fix) — currently ~565 lines, no split needed — status: done
+- [x] addon.py line count re-check (post-fix, ~565 lines) — no split needed — status: done
+
+## Current test count: 65 passing (`py -m pytest tests/`)

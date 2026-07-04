@@ -11,6 +11,18 @@ from pathlib import Path
 
 log = logging.getLogger("proxyevil.certs")
 
+# Fix: alias domain names come from config.json and are used to build
+# filesystem paths (cert_dir / f"{fake}.pem") and mkcert CLI args. A domain
+# containing path separators or ".." could escape cert_dir (directory
+# traversal) or, in principle, be crafted to look like a flag. Validate
+# strictly as a DNS-ish hostname before it ever touches a path or subprocess.
+import re as _re
+_SAFE_DOMAIN_RE = _re.compile(r'^[A-Za-z0-9]([A-Za-z0-9\-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)+$')
+
+
+def _is_safe_domain(domain: str) -> bool:
+    return bool(_SAFE_DOMAIN_RE.match(domain)) and ".." not in domain
+
 
 def setup_certs(aliases: dict, cert_dir: str):
     """Generate per-alias TLS certificates using mkcert.
@@ -31,6 +43,9 @@ def setup_certs(aliases: dict, cert_dir: str):
 
     any_generated = False
     for fake in aliases.keys():
+        if not _is_safe_domain(fake):
+            print(f"[CERT] SKIPPING unsafe/invalid domain name: {fake!r}")
+            continue
         cert_file = p / f"{fake}.pem"
         key_file  = p / f"{fake}-key.pem"
         if cert_file.exists() and key_file.exists():
@@ -70,6 +85,9 @@ def collect_certs(aliases: dict, cert_dir: str) -> list[tuple[str, str]]:
     pairs = []
     total  = len(aliases)
     for fake in aliases.keys():
+        if not _is_safe_domain(fake):
+            log.warning(f"[CERT] skipping unsafe/invalid domain name: {fake!r}")
+            continue
         cert_file = p / f"{fake}.pem"
         key_file  = p / f"{fake}-key.pem"
         if cert_file.exists() and key_file.exists():
